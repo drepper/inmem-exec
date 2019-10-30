@@ -1,8 +1,10 @@
+#include <cassert>
 #include <fcntl.h>
 #include <iostream>
 #include <libelf.h>
 #include <memory>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 #include <sys/mman.h>
 
@@ -32,19 +34,33 @@ template<> struct traits<64> {
 };
 
 std::array<unsigned char,37> codebuf {
- 0xb8, 0x01, 0x00, 0x00, 0x00, //       	    mov    $SYS_write,%eax
+ 0xb8, 0x01, 0x00, 0x00, 0x00, //                   mov    $SYS_write,%eax
  0xbf, 0x01, 0x00, 0x00, 0x00, //                   mov    $0x1,%edi
  0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, // lea    0x0,%rsi
- 0xba, 0x0c, 0x00, 0x00, 0x00, //       	    mov    $0xc,%edx
- 0x0f, 0x05, //                	                    syscall
- 0xb8, 0xe7, 0x00, 0x00, 0x00, //       	    mov    $SYS_exit_group,%eax
- 0xbf, 0x00, 0x00, 0x00, 0x00, //       	    mov    $0x0,%edi
- 0x0f, 0x05 //                	                    syscall
+ 0xba, 0x0c, 0x00, 0x00, 0x00, //                   mov    $0xc,%edx
+ 0x0f, 0x05, //                                     syscall
+ 0xb8, 0xe7, 0x00, 0x00, 0x00, //                   mov    $SYS_exit_group,%eax
+ 0xbf, 0x00, 0x00, 0x00, 0x00, //                   mov    $0x0,%edi
+ 0x0f, 0x05 //                                      syscall
 };
 
 std::array<char,12> rodatabuf {
   'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', '\n'
 };
+
+std::unordered_map<std::string,std::tuple<std::string,size_t>> symbols {
+  { "hello", { ".rodata", 0 } }
+};
+
+enum struct reloc_type {
+  abs4
+};
+
+std::vector<std::tuple<std::string,std::string,size_t,reloc_type>> relocations {
+  { "hello", ".text", 14, reloc_type::abs4 }
+};
+
+std::unordered_map<std::string,size_t> sectionidx;
 
 struct shstrtab_type {
   auto data() { return mem.data(); }
@@ -74,7 +90,43 @@ auto newscn(Elf* elf, const std::string& name, typename Traits::Word type, typen
   data->d_size = buf.size();
   data->d_off = 0;
   data->d_align = align;
+  sectionidx[name] = elf_ndxscn(scn);
   return std::make_tuple(scn, shdr, data);
+}
+
+template<typename Traits>
+void apply_relocations(Elf* elf)
+{
+  for (auto [symname, scnname, off, type] : relocations) {
+    const auto& sym = symbols[symname];
+
+    auto defscnidx = sectionidx[std::get<std::string>(sym)];
+    auto defscn = elf_getscn(elf, defscnidx);
+    auto defshdr = Traits::getshdr(defscn);
+    auto defval = defshdr->sh_addr + std::get<size_t>(sym);
+
+    auto refscnidx = sectionidx[scnname];
+    auto refscn = elf_getscn(elf, refscnidx);
+    auto refdata = elf_getdata(refscn, nullptr);
+    while (off >= refdata->d_size) {
+      off -= refdata->d_size;
+      refdata = elf_getdata(refscn, refdata);
+    }
+    switch (type) {
+    case reloc_type::abs4:
+      {
+        assert(off + 4 <= refdata->d_size);
+        auto buf = (unsigned char*) refdata->d_buf;
+        buf[off] = defval & 0xff;
+        buf[off + 1] = (defval >> 8) & 0xff;
+        buf[off + 2] = (defval >> 16) & 0xff;
+        buf[off + 3] = (defval >> 24) & 0xff;        
+      }
+      break;
+    default:
+      __builtin_unreachable();
+    }
+  }
 }
 
 template<size_t N>
@@ -119,11 +171,7 @@ void genelf(int fd)
   codeshdr->sh_addr = loadaddr + codeshdr->sh_offset;
   rodatashdr->sh_addr = loadaddr + rodatashdr->sh_offset;
 
-  const auto rodataaddr = rodatashdr->sh_addr + rodatadata->d_off;
-  codebuf[14] = rodataaddr & 0xff;
-  codebuf[15] = (rodataaddr >> 8) & 0xff;
-  codebuf[16] = (rodataaddr >> 16) & 0xff;
-  codebuf[17] = (rodataaddr >> 24) & 0xff;
+  apply_relocations<E>(elf);
 
   ftruncate(fd, size);
 
