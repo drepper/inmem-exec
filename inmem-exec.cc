@@ -120,7 +120,7 @@ void apply_relocations(Elf* elf)
         buf[off] = defval & 0xff;
         buf[off + 1] = (defval >> 8) & 0xff;
         buf[off + 2] = (defval >> 16) & 0xff;
-        buf[off + 3] = (defval >> 24) & 0xff;        
+        buf[off + 3] = (defval >> 24) & 0xff;
       }
       break;
     default:
