@@ -151,40 +151,9 @@ class x86_64_traits(object):
         pass
     def applyrelocations(self, reltab, symbols):
         for symname, scnname, off, typ in reltab:
+            pass
 
-
-class elf64_traits(object):
-    Word = ctypes.c_int32
-    Xword = ctypes.c_int64
-    Addr = ctypes.c_int64
-
-    def __init__(self, e, libelf, machine):
-        self.libelf = libelf
-        self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-        self.libelf.elf_begin.restype = (ctypes.c_void_p)
-        self.libelf.elf64_newehdr.argtypes = [ctypes.c_void_p]
-        self.libelf.elf64_newehdr.restype = (ctypes.POINTER(elf64_ehdr))
-        self.libelf.elf64_newphdr.argtypes = [ctypes.c_void_p]
-        self.libelf.elf64_newphdr.restype = (ctypes.POINTER(elf64_phdr))
-        self.libelf.elf64_getshdr.argtypes = [ctypes.c_void_p]
-        self.libelf.elf64_getshdr.restype = (ctypes.POINTER(elf64_shdr))
-        self.elfclass = e.ELFCLASS64
-        self.machine = e.get_machine(64)
-        match self.machine:
-            case 'x86_64':
-                self.machtraits = x86_64_traits()
-            case _:
-                raise "invalid machine"
-    def newehdr(self, e):
-        return self.libelf.elf64_newehdr(e)
-    def newphdr(self, e, cnt):
-        return self.libelf.elf64_newphdr(e, cnt)
-    def getshdr(self, scn):
-        return self.libelf.elf64_getshdr(scn)
-    def applyrelocations(self, reltab, symbols):
-        return self.machtraits.applyrelocations(reltab, symbols)
-
-class elf(object):
+class elfdef(object):
     EV_CURRENT = 1
     ET_EXEC = 2
     C_WRITE = 3
@@ -210,6 +179,38 @@ class elf(object):
     ELF_C_NULL = 0
     ELF_C_WRITE_MMAP = 10
 
+machtraits_64 = {
+    elfdef.EM_X86_64: x86_64_traits
+}
+
+class elf64_traits(object):
+    Word = ctypes.c_int32
+    Xword = ctypes.c_int64
+    Addr = ctypes.c_int64
+
+    def __init__(self, e, libelf):
+        self.libelf = libelf
+        self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        self.libelf.elf_begin.restype = (ctypes.c_void_p)
+        self.libelf.elf64_newehdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf64_newehdr.restype = (ctypes.POINTER(elf64_ehdr))
+        self.libelf.elf64_newphdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf64_newphdr.restype = (ctypes.POINTER(elf64_phdr))
+        self.libelf.elf64_getshdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf64_getshdr.restype = (ctypes.POINTER(elf64_shdr))
+        self.elfclass = e.ELFCLASS64
+        self.machine = e.get_machine(64)
+        self.machtraits = machtraits_64[self.machine]()
+    def newehdr(self, e):
+        return self.libelf.elf64_newehdr(e)
+    def newphdr(self, e, cnt):
+        return self.libelf.elf64_newphdr(e, cnt)
+    def getshdr(self, scn):
+        return self.libelf.elf64_getshdr(scn)
+    def applyrelocations(self, reltab, symbols):
+        return self.machtraits.applyrelocations(reltab, symbols)
+
+class elf(elfdef):
     def __init__(self, bits):
         self.libelf = ctypes.cdll.LoadLibrary('/$LIB/libelf.so.1')
         if self.libelf.elf_version(self.EV_CURRENT) != self.EV_CURRENT:
@@ -258,6 +259,8 @@ class elf(object):
         return self.libelf.elf_update(self.e, cmd)
     def end(self):
         return self.libelf.elf_end(self.e)
+    def applyrelocations(self, reltab, symbols):
+        self.traits.applyrelocations(reltab, symbols)
     @staticmethod
     def get_machine(bits):
         match platform.machine():
@@ -267,8 +270,6 @@ class elf(object):
                 return elf.EM_ARM
             case _:
                 raise "unknown platform"
-    def applyrelocations(self, reltab):
-        self.traits.applyrelocations(reltab)
 
 def gen(fname):
     e = elf(64)
@@ -323,7 +324,7 @@ def gen(fname):
     relocations = [
         [ 'hello', '.text', 14, x86_64_traits.reloc.abs4 ]
     ]
-    elf.applyrelocations(relocations, symbols)
+    e.applyrelocations(relocations, symbols)
 
     os.ftruncate(fd, size)
 
