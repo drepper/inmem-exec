@@ -1,3 +1,4 @@
+import collections
 import ctypes
 import enum
 import os
@@ -294,6 +295,13 @@ class elf(elfdef):
         return self.libelf.elf_end(self.e)
     def applyrelocations(self, reltab, symbols):
         self.traits.applyrelocations(self, reltab, symbols)
+    def lastaddr(self, names):
+        addr = 0
+        for name in names:
+            if name in self.sectionidx:
+                shdr = self.getshdr(self.getscn(self.sectionidx[name]))
+                addr = max(addr, shdr.contents.offset + shdr.contents.size)
+        return addr
     @staticmethod
     def get_machine(bits):
         match platform.machine():
@@ -358,18 +366,26 @@ def gen(fname):
     ]
     e.applyrelocations(relocations, symbols)
 
+    Segment = collections.namedtuple('Segment', 'idx sections flags')
+    segments = [
+        Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X)
+    ]
+
     ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
 
     ehdr.contents.entry = codeshdr.contents.addr
 
-    phdr.contents[phdrs.code].type = e.PT_LOAD
-    phdr.contents[phdrs.code].flags = e.PF_R | e.PF_X
-    phdr.contents[phdrs.code].offset = 0
-    phdr.contents[phdrs.code].vaddr = loadaddr
-    phdr.contents[phdrs.code].paddr = phdr.contents[phdrs.code].vaddr
-    phdr.contents[phdrs.code].filesz = rodatashdr.contents.offset + rodatashdr.contents.size
-    phdr.contents[phdrs.code].memsz = phdr.contents[phdrs.code].filesz
-    phdr.contents[phdrs.code].align = resource.getpagesize()
+    for s in segments:
+        phdr.contents[s.idx].type = e.PT_LOAD
+        phdr.contents[s.idx].flags = s.flags
+        phdr.contents[s.idx].offset = 0
+        phdr.contents[s.idx].vaddr = loadaddr
+        phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
+        phdr.contents[s.idx].filesz = rodatashdr.contents.offset + rodatashdr.contents.size
+        print(f'expl filesz {phdr.contents[s.idx].filesz}')
+        print(f'call filesz {e.lastaddr(s.sections)}')
+        phdr.contents[s.idx].memsz = phdr.contents[s.idx].filesz
+        phdr.contents[s.idx].align = resource.getpagesize()
 
     e.update(e.ELF_C_WRITE_MMAP)
 
