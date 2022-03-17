@@ -173,8 +173,6 @@ void genelf(int fd)
 
   apply_relocations<E>(elf);
 
-  ftruncate(fd, size);
-
   ehdr->e_shstrndx = elf_ndxscn(shstrscn);
 
   ehdr->e_entry = codeshdr->sh_addr;

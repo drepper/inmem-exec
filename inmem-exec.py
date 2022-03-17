@@ -2,6 +2,7 @@ import ctypes
 import enum
 import os
 import platform
+import resource
 import sys
 
 libc = ctypes.CDLL(None)
@@ -39,7 +40,7 @@ class bytebuf(object):
 
 class elf_data(ctypes.Structure):
     _fields_ = [
-        ('buf', ctypes.c_char_p),
+        ('buf', ctypes.POINTER(ctypes.c_byte)),
         ('type', ctypes.c_uint32),
         ('version', ctypes.c_uint32),
         ('size', ctypes.c_size_t),
@@ -167,17 +168,9 @@ class x86_64_traits(object):
             match typ:
                 case self.reloc.abs4:
                     assert off + 4 <= refdata.contents.size
-                    buf = list(ctypes.string_at(refdata.contents.buf, refdata.contents.size))
-                    print('{}'.format([f'{x:02x}' for x in buf]))
-                    print(refdata.contents.size, ' = ', len(buf))
-                    print(off)
-                    buf[off] = defval & 0xff
-                    buf[off + 1] = (defval >> 8) & 0xff
-                    buf[off + 2] = (defval >> 16) & 0xff
-                    buf[off + 3] = (defval >> 24) & 0xff
-                    print(buf)
-                    # refdata.contents.buf = ctypes.cast(bytes(buf), ctypes.c_char_p)
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(bytes(buf), refdata.contents.size), ctypes.c_char_p)
+                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
+                    buf = buf[:off] + bytes([defval & 0xff, (defval >> 8) & 0xff, (defval >> 16) & 0xff, (defval >> 24) & 0xff]) + buf[off+4:]
+                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case _:
                     raise ValueError('invalid relocation type')
 
@@ -206,6 +199,10 @@ class elfdef(object):
     ELF_T_BYTE = 0
     ELF_C_NULL = 0
     ELF_C_WRITE_MMAP = 10
+    PT_LOAD = 1
+    PF_R = 4
+    PF_W = 2
+    PF_X = 1
 
 machtraits_64 = {
     elfdef.EM_X86_64: x86_64_traits
@@ -232,7 +229,7 @@ class elf64_traits(object):
     def newehdr(self, e):
         return self.libelf.elf64_newehdr(e)
     def newphdr(self, e, cnt):
-        return self.libelf.elf64_newphdr(e, cnt)
+        return ctypes.cast(self.libelf.elf64_newphdr(e, cnt), ctypes.POINTER(elf64_phdr * cnt))
     def getshdr(self, scn):
         return self.libelf.elf64_getshdr(scn)
     def applyrelocations(self, e, reltab, symbols):
@@ -277,15 +274,10 @@ class elf(elfdef):
         shdr.contents.type = type
         shdr.contents.flags = flags
         data = self.newdata(scn)
-        uint8_p = ctypes.POINTER(ctypes.c_uint8)
-        # data.contents.buf = ctypes.cast(buf.data(), ctypes.c_char_p)
-        # data.contents.buf = ctypes.cast(uint8_p.from_buffer(buf.data()), ctypes.c_char_p)
-        print(f'{name} = {buf.data()}')
-        data.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf.data(), len(buf)), ctypes.c_char_p)
+        data.contents.size = len(buf)
+        data.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf.data(), data.contents.size), ctypes.POINTER(ctypes.c_byte))
         data.contents.type = self.ELF_T_BYTE
         data.contents.version = self.EV_CURRENT
-        data.contents.size = len(buf)
-        print(f'section {name} defined with size {len(buf)} really {len(data.contents.buf)}')
         data.contents.off = 0
         data.contents.align = align
         self.sectionidx[name] = self.libelf.elf_ndxscn(scn)
@@ -315,8 +307,7 @@ class elf(elfdef):
 def gen(fname):
     e = elf(64)
 
-    # fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
-    fd = os.open('ttt', os.O_RDWR | os.O_CREAT, 0o666)
+    fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
     if not e.open(fd):
         raise RuntimeError("cannot open elf")
 
@@ -332,8 +323,8 @@ def gen(fname):
     ehdr.contents.version = e.EV_CURRENT
 
     @enum.unique
-    class phdrs(enum.Enum):
-        code = 1
+    class phdrs(enum.IntEnum):
+        code = 0
 
     phdr = e.newphdr(len(phdrs))
 
@@ -346,7 +337,7 @@ def gen(fname):
                               0xbf, 0x00, 0x00, 0x00, 0x00, #                   mov    $0x0,%edi
                               0x0f, 0x05 #                                      syscall
     ]))
-    codescn, codeshdr, codedata = e.newscn(b'.text', e.SHT_PROGBITS, e.SHF_ALLOC|e.SHF_EXECINSTR, codebuf, 16)
+    codescn, codeshdr, codedata = e.newscn(b'.text', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_EXECINSTR, codebuf, 16)
 
     rodatabuf = bytebuf(b'hello world\n')
     rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, rodatabuf, 16);
@@ -367,11 +358,18 @@ def gen(fname):
     ]
     e.applyrelocations(relocations, symbols)
 
-    os.ftruncate(fd, size)
-
     ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
 
     ehdr.contents.entry = codeshdr.contents.addr
+
+    phdr.contents[phdrs.code].type = e.PT_LOAD
+    phdr.contents[phdrs.code].flags = e.PF_R | e.PF_X
+    phdr.contents[phdrs.code].offset = 0
+    phdr.contents[phdrs.code].vaddr = loadaddr
+    phdr.contents[phdrs.code].paddr = phdr.contents[phdrs.code].vaddr
+    phdr.contents[phdrs.code].filesz = rodatashdr.contents.offset + rodatashdr.contents.size
+    phdr.contents[phdrs.code].memsz = phdr.contents[phdrs.code].filesz
+    phdr.contents[phdrs.code].align = resource.getpagesize()
 
     e.update(e.ELF_C_WRITE_MMAP)
 
