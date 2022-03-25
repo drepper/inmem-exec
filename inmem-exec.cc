@@ -34,21 +34,21 @@ template<> struct traits<64> {
 };
 
 std::array<unsigned char,37> codebuf {
- 0xb8, 0x01, 0x00, 0x00, 0x00, //                   mov    $SYS_write,%eax
- 0xbf, 0x01, 0x00, 0x00, 0x00, //                   mov    $0x1,%edi
- 0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, // lea    0x0,%rsi
- 0xba, 0x0c, 0x00, 0x00, 0x00, //                   mov    $0xc,%edx
- 0x0f, 0x05, //                                     syscall
- 0xb8, 0xe7, 0x00, 0x00, 0x00, //                   mov    $SYS_exit_group,%eax
- 0xbf, 0x00, 0x00, 0x00, 0x00, //                   mov    $0x0,%edi
- 0x0f, 0x05 //                                      syscall
+  0xb8, 0x01, 0x00, 0x00, 0x00, //                   mov    $SYS_write,%eax
+  0xbf, 0x01, 0x00, 0x00, 0x00, //                   mov    $0x1,%edi
+  0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, // lea    0x0,%rsi
+  0xba, 0x0c, 0x00, 0x00, 0x00, //                   mov    $0xc,%edx
+  0x0f, 0x05, //                                     syscall
+  0xb8, 0xe7, 0x00, 0x00, 0x00, //                   mov    $SYS_exit_group,%eax
+  0xbf, 0x00, 0x00, 0x00, 0x00, //                   mov    $0x0,%edi
+  0x0f, 0x05 //                                      syscall
 };
 
 std::array<char,12> rodatabuf {
   'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', '\n'
 };
 
-std::unordered_map<std::string,std::tuple<std::string,size_t>> symbols {
+const std::unordered_map<std::string,std::tuple<std::string,size_t>> symbols {
   { "hello", { ".rodata", 0 } }
 };
 
@@ -98,7 +98,7 @@ template<typename Traits>
 void apply_relocations(Elf* elf)
 {
   for (auto [symname, scnname, off, type] : relocations) {
-    const auto& sym = symbols[symname];
+    const auto& sym = symbols.at(symname);
 
     auto defscnidx = sectionidx[std::get<std::string>(sym)];
     auto defscn = elf_getscn(elf, defscnidx);
@@ -164,7 +164,7 @@ void genelf(int fd)
   // Keep as last added section.
   auto [shstrscn, shstrshdr, shstrdata] = newscn<E>(elf, ".shstrtab", SHT_STRTAB, 0, shstrbuf, 1);
 
-  auto size = elf_update(elf, ELF_C_NULL);
+  elf_update(elf, ELF_C_NULL);
 
   const typename E::Addr loadaddr = 0x40000;
 
