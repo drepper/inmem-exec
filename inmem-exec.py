@@ -227,6 +227,7 @@ class elf64_traits(object):
         self.elfclass = e.ELFCLASS64
         self.machine = e.get_machine(64)
         self.machtraits = machtraits_64[self.machine]()
+        self.phdr_type = elf64_phdr
     def newehdr(self, e):
         return self.libelf.elf64_newehdr(e)
     def newphdr(self, e, cnt):
@@ -295,13 +296,24 @@ class elf(elfdef):
         return self.libelf.elf_end(self.e)
     def applyrelocations(self, reltab, symbols):
         self.traits.applyrelocations(self, reltab, symbols)
-    def lastaddr(self, names):
-        addr = 0
+    def firstlastaddr(self, names):
+        offset = 0
+        addr = -1
+        filesz = 0
+        memsz = 0
         for name in names:
             if name in self.sectionidx:
                 shdr = self.getshdr(self.getscn(self.sectionidx[name]))
-                addr = max(addr, shdr.contents.offset + shdr.contents.size)
-        return addr
+                offset = min(offset, shdr.contents.offset)
+                addr = shdr.contents.addr if addr == -1 else min(addr, shdr.contents.addr)
+                memsz = ((memsz + shdr.contents.addralign - 1) & ~(shdr.contents.addralign - 1)) + shdr.contents.size
+                if shdr.contents.type == self.SHT_PROGBITS:
+                    filesz = memsz
+            elif name == 'Ehdr':
+                offset = 0
+                memsz = ctypes.sizeof(self.traits.phdr_type)
+                filesz = memsz
+        return offset, addr, filesz, memsz
     @staticmethod
     def get_machine(bits):
         match platform.machine():
@@ -315,7 +327,8 @@ class elf(elfdef):
 def gen(fname):
     e = elf(64)
 
-    fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
+    # fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
+    fd = os.open('test', os.O_RDWR|os.O_CREAT|os.O_TRUNC, 0o777)
     if not e.open(fd):
         raise RuntimeError("cannot open elf")
 
@@ -333,6 +346,7 @@ def gen(fname):
     @enum.unique
     class phdrs(enum.IntEnum):
         code = 0
+        data = 1
 
     phdr = e.newphdr(len(phdrs))
 
@@ -350,6 +364,9 @@ def gen(fname):
     rodatabuf = bytebuf(b'hello world\n')
     rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, rodatabuf, 16);
 
+    databuf = bytebuf(b'\x00\x00\x00\x00')
+    datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC, databuf, 16);
+
     shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', e.SHT_STRTAB, 0, e.shstrtab, 1)
 
     size = e.update(e.ELF_C_NULL)
@@ -357,6 +374,24 @@ def gen(fname):
     loadaddr = 0x40000
     codeshdr.contents.addr = loadaddr + codeshdr.contents.offset
     rodatashdr.contents.addr = loadaddr + rodatashdr.contents.offset
+
+    Segment = collections.namedtuple('Segment', 'idx sections flags')
+    segments = [
+        Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X),
+        # Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W)
+    ]
+
+    for s in segments:
+        offset, addr, filesz, memsz = e.firstlastaddr(s.sections)
+        print(offset,addr,filesz,memsz)
+        phdr.contents[s.idx].type = e.PT_LOAD
+        phdr.contents[s.idx].flags = s.flags
+        phdr.contents[s.idx].offset = offset & (resource.getpagesize() - 1)
+        phdr.contents[s.idx].vaddr = loadaddr
+        phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
+        phdr.contents[s.idx].filesz = filesz
+        phdr.contents[s.idx].memsz = memsz
+        phdr.contents[s.idx].align = resource.getpagesize()
 
     symbols = {
         'hello': [ b'.rodata', 0 ]
@@ -366,26 +401,9 @@ def gen(fname):
     ]
     e.applyrelocations(relocations, symbols)
 
-    Segment = collections.namedtuple('Segment', 'idx sections flags')
-    segments = [
-        Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X)
-    ]
-
     ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
 
     ehdr.contents.entry = codeshdr.contents.addr
-
-    for s in segments:
-        phdr.contents[s.idx].type = e.PT_LOAD
-        phdr.contents[s.idx].flags = s.flags
-        phdr.contents[s.idx].offset = 0
-        phdr.contents[s.idx].vaddr = loadaddr
-        phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
-        phdr.contents[s.idx].filesz = rodatashdr.contents.offset + rodatashdr.contents.size
-        print(f'expl filesz {phdr.contents[s.idx].filesz}')
-        print(f'call filesz {e.lastaddr(s.sections)}')
-        phdr.contents[s.idx].memsz = phdr.contents[s.idx].filesz
-        phdr.contents[s.idx].align = resource.getpagesize()
 
     e.update(e.ELF_C_WRITE_MMAP)
 
