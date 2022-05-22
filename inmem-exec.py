@@ -335,7 +335,7 @@ def gen(fname):
     ehdr = e.newehdr()
     ehdr.contents.ident[:e.SELFMAG] = e.ELFMAG
     ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
-    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if sys.byteorder == 'little'  else e.ELFDATA2MSB
+    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if sys.byteorder == 'little' else e.ELFDATA2MSB
     ehdr.contents.ident[e.EI_VERSION] = e.EV_CURRENT
     ehdr.contents.ident[e.EI_OSABI] = e.ELFOSABI_NONE
     ehdr.contents.ident[e.EI_ABIVERSION] = 0
