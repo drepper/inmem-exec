@@ -2,6 +2,8 @@
 #include <fcntl.h>
 #include <iostream>
 #include <libelf.h>
+#include <algorithm>
+#include <array>
 #include <memory>
 #include <unistd.h>
 #include <unordered_map>
