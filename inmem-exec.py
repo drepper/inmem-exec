@@ -296,14 +296,15 @@ class elf(elfdef):
     def applyrelocations(self, reltab, symbols):
         self.traits.applyrelocations(self, reltab, symbols)
     def firstlastaddr(self, names, loadaddr):
-        offset = 0
+        offset = -1
         addr = -1
         lastfileoffset = -1
         lastmemaddr = -1
         for name in names:
             if name in self.sectionidx:
                 shdr = self.getshdr(self.getscn(self.sectionidx[name]))
-                offset = min(offset, shdr.contents.offset)
+                shdr.contents.addr = loadaddr + shdr.contents.offset
+                offset = shdr.contents.offset if offset == -1 else min(offset, shdr.contents.offset)
                 if shdr.contents.type == self.SHT_PROGBITS:
                     lastfileoffset = max(lastfileoffset, shdr.contents.offset + shdr.contents.size)
                 addr = shdr.contents.addr if addr == -1 else min(addr, shdr.contents.addr)
@@ -350,7 +351,7 @@ def gen(fname):
     Segment = collections.namedtuple('Segment', 'idx sections flags')
     segments = [
         Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X),
-        # Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W)
+        Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W)
     ]
 
     phdr = e.newphdr(len(segments))
@@ -369,29 +370,31 @@ def gen(fname):
     rodatabuf = bytebuf(b'hello world\n')
     rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, rodatabuf, 16);
 
-    # databuf = bytebuf(b'\x00\x00\x00\x00')
-    # datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_WRITE, databuf, 16);
+    databuf = bytebuf(b'\x00\x00\x00\x00')
+    datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_WRITE, databuf, 16);
 
     shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', e.SHT_STRTAB, 0, e.shstrtab, 1)
 
     size = e.update(e.ELF_C_NULL)
 
-    loadaddr = 0x40000
-    codeshdr.contents.addr = loadaddr + codeshdr.contents.offset
-    rodatashdr.contents.addr = loadaddr + rodatashdr.contents.offset
+    ps = resource.getpagesize()
 
+    loadaddr = 0x40000
+
+    lastvaddr = loadaddr
     for s in segments:
-        offset, addr, filesz, memsz = e.firstlastaddr(s.sections, loadaddr)
-        assert((offset & (resource.getpagesize() - 1)) == (addr & (resource.getpagesize() - 1)))
-        addend = offset & (resource.getpagesize() - 1)
+        lastvaddr = (lastvaddr + ps - 1) & ~(ps - 1)
+        offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
+        assert((offset & (ps - 1)) == (addr & (ps - 1)))
         phdr.contents[s.idx].type = e.PT_LOAD
         phdr.contents[s.idx].flags = s.flags
-        phdr.contents[s.idx].offset = offset & ~(resource.getpagesize() - 1)
-        phdr.contents[s.idx].vaddr = addr & ~(resource.getpagesize() - 1)
+        phdr.contents[s.idx].offset = offset
+        phdr.contents[s.idx].vaddr = addr
         phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
-        phdr.contents[s.idx].filesz = filesz + addend
-        phdr.contents[s.idx].memsz = memsz + addend
-        phdr.contents[s.idx].align = resource.getpagesize()
+        phdr.contents[s.idx].filesz = filesz
+        phdr.contents[s.idx].memsz = memsz
+        phdr.contents[s.idx].align = ps
+        lastvaddr = phdr.contents[s.idx].vaddr + phdr.contents[s.idx].memsz
 
     symbols = {
         'hello': [ b'.rodata', 0 ]
