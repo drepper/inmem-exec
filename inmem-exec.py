@@ -179,8 +179,6 @@ class elfdef(object):
     EV_CURRENT = 1
     ET_EXEC = 2
     C_WRITE = 3
-    ELFMAG = b'\177ELF'
-    SELFMAG = 4
     EI_CLASS = 4
     ELFCLASS32 = 1
     ELFCLASS64 = 2
@@ -195,6 +193,7 @@ class elfdef(object):
     EM_X86_64 = 62
     SHT_PROGBITS = 1
     SHT_STRTAB = 3
+    SHF_WRITE = 1
     SHF_ALLOC = 2
     SHF_EXECINSTR = 4
     ELF_T_BYTE = 0
@@ -296,24 +295,25 @@ class elf(elfdef):
         return self.libelf.elf_end(self.e)
     def applyrelocations(self, reltab, symbols):
         self.traits.applyrelocations(self, reltab, symbols)
-    def firstlastaddr(self, names):
+    def firstlastaddr(self, names, loadaddr):
         offset = 0
         addr = -1
-        filesz = 0
-        memsz = 0
+        lastfileoffset = -1
+        lastmemaddr = -1
         for name in names:
             if name in self.sectionidx:
                 shdr = self.getshdr(self.getscn(self.sectionidx[name]))
                 offset = min(offset, shdr.contents.offset)
-                addr = shdr.contents.addr if addr == -1 else min(addr, shdr.contents.addr)
-                memsz = ((memsz + shdr.contents.addralign - 1) & ~(shdr.contents.addralign - 1)) + shdr.contents.size
                 if shdr.contents.type == self.SHT_PROGBITS:
-                    filesz = memsz
+                    lastfileoffset = max(lastfileoffset, shdr.contents.offset + shdr.contents.size)
+                addr = shdr.contents.addr if addr == -1 else min(addr, shdr.contents.addr)
+                lastmemaddr = max(lastmemaddr, shdr.contents.addr + shdr.contents.size)
             elif name == 'Ehdr':
                 offset = 0
-                memsz = ctypes.sizeof(self.traits.phdr_type)
-                filesz = memsz
-        return offset, addr, filesz, memsz
+                lastfileoffset = max(lastfileoffset, ctypes.sizeof(self.traits.phdr_type))
+                addr = loadaddr
+                lastmemaddr = max(lastmemaddr, ctypes.sizeof(self.traits.phdr_type))
+        return offset, addr, lastfileoffset - offset, lastmemaddr - addr
     @staticmethod
     def get_machine(bits):
         match platform.machine():
@@ -327,13 +327,12 @@ class elf(elfdef):
 def gen(fname):
     e = elf(64)
 
-    # fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
-    fd = os.open('test', os.O_RDWR|os.O_CREAT|os.O_TRUNC, 0o777)
+    fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
+    # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC, 0o777)
     if not e.open(fd):
         raise RuntimeError("cannot open elf")
 
     ehdr = e.newehdr()
-    ehdr.contents.ident[:e.SELFMAG] = e.ELFMAG
     ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
     ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if sys.byteorder == 'little' else e.ELFDATA2MSB
     ehdr.contents.ident[e.EI_VERSION] = e.EV_CURRENT
@@ -348,7 +347,13 @@ def gen(fname):
         code = 0
         data = 1
 
-    phdr = e.newphdr(len(phdrs))
+    Segment = collections.namedtuple('Segment', 'idx sections flags')
+    segments = [
+        Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X),
+        # Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W)
+    ]
+
+    phdr = e.newphdr(len(segments))
 
     codebuf = bytebuf(bytes([ 0xb8, 0x01, 0x00, 0x00, 0x00, #                   mov    $SYS_write,%eax
                               0xbf, 0x01, 0x00, 0x00, 0x00, #                   mov    $0x1,%edi
@@ -364,8 +369,8 @@ def gen(fname):
     rodatabuf = bytebuf(b'hello world\n')
     rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, rodatabuf, 16);
 
-    databuf = bytebuf(b'\x00\x00\x00\x00')
-    datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC, databuf, 16);
+    # databuf = bytebuf(b'\x00\x00\x00\x00')
+    # datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_WRITE, databuf, 16);
 
     shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', e.SHT_STRTAB, 0, e.shstrtab, 1)
 
@@ -375,22 +380,17 @@ def gen(fname):
     codeshdr.contents.addr = loadaddr + codeshdr.contents.offset
     rodatashdr.contents.addr = loadaddr + rodatashdr.contents.offset
 
-    Segment = collections.namedtuple('Segment', 'idx sections flags')
-    segments = [
-        Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X),
-        # Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W)
-    ]
-
     for s in segments:
-        offset, addr, filesz, memsz = e.firstlastaddr(s.sections)
-        print(offset,addr,filesz,memsz)
+        offset, addr, filesz, memsz = e.firstlastaddr(s.sections, loadaddr)
+        assert((offset & (resource.getpagesize() - 1)) == (addr & (resource.getpagesize() - 1)))
+        addend = offset & (resource.getpagesize() - 1)
         phdr.contents[s.idx].type = e.PT_LOAD
         phdr.contents[s.idx].flags = s.flags
-        phdr.contents[s.idx].offset = offset & (resource.getpagesize() - 1)
-        phdr.contents[s.idx].vaddr = loadaddr
+        phdr.contents[s.idx].offset = offset & ~(resource.getpagesize() - 1)
+        phdr.contents[s.idx].vaddr = addr & ~(resource.getpagesize() - 1)
         phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
-        phdr.contents[s.idx].filesz = filesz
-        phdr.contents[s.idx].memsz = memsz
+        phdr.contents[s.idx].filesz = filesz + addend
+        phdr.contents[s.idx].memsz = memsz + addend
         phdr.contents[s.idx].align = resource.getpagesize()
 
     symbols = {
