@@ -1,1 +1,3 @@
 inmem-exec
+*.o
+asm-hello-x86_64
