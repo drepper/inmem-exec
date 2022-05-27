@@ -368,7 +368,7 @@ def elfgen(fname, program):
     e = elf(64)
 
     fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
-    # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC, 0o777)
+    # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
     if not e.open(fd):
         raise RuntimeError("cannot open elf")
 
