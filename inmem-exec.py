@@ -88,6 +88,8 @@ class elf32_traits(object):
     Word = ctypes.c_int32
     Xword = ctypes.c_int32
     Addr = ctypes.c_int32
+    codealign = 16
+    dataalign = 16
 
     def __init__(self):
         self.e = e
@@ -149,6 +151,8 @@ class x86_64_traits(object):
     @enum.unique
     class reloc(enum.Enum):
         abs4 = 1
+    codealign = 16
+    dataalign = 16
     def __init__(self):
         pass
     def applyrelocations(self, e, reltab, symbols):
@@ -258,6 +262,8 @@ class elf(elfdef):
         self.traits = elf64_traits(self, self.libelf) if bits == 64 else elf32_traits(self, self.libelf)
         self.shstrtab = elfstrtab()
         self.sectionidx = dict()
+        self.codealign = self.traits.machtraits.codealign
+        self.dataalign = self.traits.machtraits.dataalign
     def open(self, fd):
         self.fd = fd
         self.e = self.libelf.elf_begin(fd, self.C_WRITE, None)
@@ -268,7 +274,7 @@ class elf(elfdef):
         return self.traits.newphdr(self.e, cnt)
     def getshdr(self, scn):
         return self.traits.getshdr(scn)
-    def newscn(self, name, type, flags, buf, align):
+    def newscn(self, name, type, flags, buf, align = None):
         scn = self.libelf.elf_newscn(self.e)
         shdr = self.getshdr(scn)
         shdr.contents.name = self.shstrtab.push(name)
@@ -280,7 +286,7 @@ class elf(elfdef):
         data.contents.type = self.ELF_T_BYTE
         data.contents.version = self.EV_CURRENT
         data.contents.off = 0
-        data.contents.align = align
+        data.contents.align = align if align else self.codealign if (flags & self.SHF_EXECINSTR) != 0 else self.dataalign
         self.sectionidx[name] = self.libelf.elf_ndxscn(scn)
         return scn, shdr, data
     def getscn(self, ndx):
@@ -325,7 +331,40 @@ class elf(elfdef):
             case _:
                 raise RuntimeError("unknown platform")
 
-def gen(fname):
+
+class Config(object):
+    def __init__(self):
+        self.ps = resource.getpagesize()
+    loadaddr = 0x40000
+
+
+class Program(object):
+    def __init__(self, config):
+        self.config = config
+
+
+def compile(source, program):
+    # XYZ Use source and program.config
+    program.codebuf = bytebuf(bytes([ 0xb8, 0x01, 0x00, 0x00, 0x00, #                   mov    $SYS_write,%eax
+                                      0xbf, 0x01, 0x00, 0x00, 0x00, #                   mov    $0x1,%edi
+                                      0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, # lea    0x0,%rsi
+                                      0xba, 0x0c, 0x00, 0x00, 0x00, #                   mov    $0xc,%edx
+                                      0x0f, 0x05, #                                     syscall
+                                      0xb8, 0xe7, 0x00, 0x00, 0x00, #                   mov    $SYS_exit_group,%eax
+                                      0xbf, 0x00, 0x00, 0x00, 0x00, #                   mov    $0x0,%edi
+                                      0x0f, 0x05 #                                      syscall
+    ]))
+    program.rodatabuf = bytebuf(b'hello world\n')
+    program.databuf = bytebuf(b'\x00\x00\x00\x00')
+    program.symbols = {
+        'hello': [ b'.rodata', 0 ]
+    }
+    program.relocations = [
+        [ 'hello', b'.text', 14, x86_64_traits.reloc.abs4 ]
+    ]
+
+
+def elfgen(fname, program):
     e = elf(64)
 
     fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
@@ -349,39 +388,34 @@ def gen(fname):
         data = 1
 
     Segment = collections.namedtuple('Segment', 'idx sections flags')
+    # At a minimum there is a .text section and an executable segment.
     segments = [
-        Segment(phdrs.code, [ 'Ehdr', b'.text', b'.rodata' ], e.PF_R | e.PF_X),
-        Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W)
+        Segment(phdrs.code, [ 'Ehdr', b'.text' ], e.PF_R | e.PF_X)
     ]
+    need_rodata = hasattr(program, 'rodatabuf')
+    if need_rodata:
+        segments[phdrs.code].sections.append(b'.rodata')
+    need_data = hasattr(program, 'databuf')
+    if need_data:
+        segments.append(Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W))
 
     phdr = e.newphdr(len(segments))
 
-    codebuf = bytebuf(bytes([ 0xb8, 0x01, 0x00, 0x00, 0x00, #                   mov    $SYS_write,%eax
-                              0xbf, 0x01, 0x00, 0x00, 0x00, #                   mov    $0x1,%edi
-                              0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, # lea    0x0,%rsi
-                              0xba, 0x0c, 0x00, 0x00, 0x00, #                   mov    $0xc,%edx
-                              0x0f, 0x05, #                                     syscall
-                              0xb8, 0xe7, 0x00, 0x00, 0x00, #                   mov    $SYS_exit_group,%eax
-                              0xbf, 0x00, 0x00, 0x00, 0x00, #                   mov    $0x0,%edi
-                              0x0f, 0x05 #                                      syscall
-    ]))
-    codescn, codeshdr, codedata = e.newscn(b'.text', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_EXECINSTR, codebuf, 16)
+    codescn, codeshdr, codedata = e.newscn(b'.text', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_EXECINSTR, program.codebuf)
 
-    rodatabuf = bytebuf(b'hello world\n')
-    rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, rodatabuf, 16);
+    if need_rodata:
+        rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, program.rodatabuf)
 
-    databuf = bytebuf(b'\x00\x00\x00\x00')
-    datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_WRITE, databuf, 16);
+    if need_data:
+        datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_WRITE, program.databuf)
 
     shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', e.SHT_STRTAB, 0, e.shstrtab, 1)
 
     size = e.update(e.ELF_C_NULL)
 
-    ps = resource.getpagesize()
+    ps = program.config.ps
 
-    loadaddr = 0x40000
-
-    lastvaddr = loadaddr
+    lastvaddr = program.config.loadaddr
     for s in segments:
         lastvaddr = (lastvaddr + ps - 1) & ~(ps - 1)
         offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
@@ -396,13 +430,7 @@ def gen(fname):
         phdr.contents[s.idx].align = ps
         lastvaddr = phdr.contents[s.idx].vaddr + phdr.contents[s.idx].memsz
 
-    symbols = {
-        'hello': [ b'.rodata', 0 ]
-    }
-    relocations = [
-        [ 'hello', b'.text', 14, x86_64_traits.reloc.abs4 ]
-    ]
-    e.applyrelocations(relocations, symbols)
+    e.applyrelocations(program.relocations, program.symbols)
 
     ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
 
@@ -416,7 +444,9 @@ def gen(fname):
 
 def main(fname, *args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
-    e = gen(fname)
+    program = Program(Config())
+    compile('', program)
+    e = elfgen(fname, program)
     argv = (ctypes.c_char_p * (2 + len(args)))(fname, *args, ctypes.c_char_p())
     env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
     libc.syscall(SYS_execveat, e.fd, b'', argv, env, AT_EMPTY_PATH)

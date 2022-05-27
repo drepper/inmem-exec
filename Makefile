@@ -24,6 +24,6 @@ check: $(program)
 	./$(program) | cmp <(echo hello world) -
 
 clean:
-	rm $(program)
+	$(RM) $(program) *.o asm-hello-x86_64
 
 .PHONY: all run check clean
