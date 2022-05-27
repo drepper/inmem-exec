@@ -150,6 +150,7 @@ class elf64_shdr(ctypes.Structure):
 class x86_64_traits(object):
     @enum.unique
     class reloc(enum.Enum):
+        none = 0
         abs4 = 1
     codealign = 16
     dataalign = 16
@@ -162,7 +163,8 @@ class x86_64_traits(object):
             defscnidx = e.sectionidx[sym[0]]
             defscn = e.getscn(defscnidx)
             defshdr = e.getshdr(defscn)
-            defval = defshdr.contents.addr + sym[1]
+            sym[1] += defshdr.contents.addr
+            defval = sym[1]
 
             refscnidx = e.sectionidx[scnname]
             refscn = e.getscn(refscnidx)
@@ -176,6 +178,8 @@ class x86_64_traits(object):
                     buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + bytes([defval & 0xff, (defval >> 8) & 0xff, (defval >> 16) & 0xff, (defval >> 24) & 0xff]) + buf[off+4:]
                     refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case self.reloc.none:
+                    pass
                 case _:
                     raise ValueError('invalid relocation type')
 
@@ -357,9 +361,11 @@ def compile(source, program):
     program.rodatabuf = bytebuf(b'hello world\n')
     program.databuf = bytebuf(b'\x00\x00\x00\x00')
     program.symbols = {
+        '_start': [ b'.text', 0 ],
         'hello': [ b'.rodata', 0 ]
     }
     program.relocations = [
+        [ '_start', b'.text', 0, x86_64_traits.reloc.none ],
         [ 'hello', b'.text', 14, x86_64_traits.reloc.abs4 ]
     ]
 
@@ -434,7 +440,7 @@ def elfgen(fname, program):
 
     ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
 
-    ehdr.contents.entry = codeshdr.contents.addr
+    ehdr.contents.entry = program.symbols['_start'][1] if '_start' in program.symbols else codeshdr.contents.addr
 
     e.update(e.ELF_C_WRITE_MMAP)
 
