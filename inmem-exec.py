@@ -31,12 +31,15 @@ class elfstrtab(object):
         return res
 
 class bytebuf(object):
-    def __init__(self, b):
+    def __init__(self, b=b''):
         self.b = b
     def data(self):
         return self.b
     def __len__(self):
         return len(self.b)
+    def __iadd__(self, b):
+        self.b += b
+        return self
 
 
 class elf_data(ctypes.Structure):
@@ -339,16 +342,107 @@ class elf(elfdef):
 class Config(object):
     def __init__(self):
         self.ps = resource.getpagesize()
+        self.endian = sys.byteorder
+        self.encoding = 'UTF-8'
     loadaddr = 0x40000
 
+
+Symbol = collections.namedtuple('Symbol', 'name size section addr')
 
 class Program(object):
     def __init__(self, config):
         self.config = config
+        self.symbols = dict()
+        self.codebuf = bytebuf()
+        self.rodatabuf = bytebuf()
+        self.databuf = bytebuf()
 
 
-def compile(source, program):
-    # XYZ Use source and program.config
+def get_type(value):
+    match value:
+        case ast.Constant(value):
+            if type(value) == int:
+                return 'int'
+            if type(value) == str:
+                return 'str'
+    raise RuntimeError('invalid value type')
+
+
+def define_variable(program, var, ann, value):
+    match ann:
+        case 'int':
+            size = 4
+        case 'long' | 'ptr':
+            size = 8 # XYZ
+        case _:
+            raise RuntimeError('invalid annotation')
+    addr = len(program.databuf)
+    if addr % size != 0:
+        npad = size * ((addr + size - 1) // size) - addr
+        program.databuf += (0).to_bytes(npad, program.config.endian)
+        addr += npad
+    program.symbols[var] = Symbol(var, size, b'.data', addr)
+    match value:
+        case ast.Constant(v) if type(v) == int:
+            program.databuf += v.to_bytes(size, program.config.endian)
+        case _:
+            raise RuntimeError('invalid variable value')
+
+
+def store_cstring(program, s):
+    offset = len(program.rodatabuf)
+    program.rodatabuf += bytes(s, program.config.encoding) + b'\x00'
+    return '.rodata', offset
+
+
+def compile_body(body, program):
+    for e in body:
+        match e:
+            case ast.Expr(ast.Call(ast.Name('write',_),args,[])):
+                fd = 1
+                if len(args) > 1 and type(args[0]) == int:
+                    fd = args[0]
+                    args = args[1:]
+                for a in args:
+                    match a:
+                        case ast.Constant(s) if type(s) == str:
+                            section, offset = store_cstring(program, s)
+                        case _:
+                            raise RuntimeError(f'unhandled write parameter type {a}')
+                print(f'call write with {len(args)} arguments')
+            case ast.Expr(ast.Call(ast.Name('exit',_),[arg],[])):
+                print(f'call exit with {arg}')
+            case _:
+                raise RuntimeError(f'unhandled function call {e}')
+
+
+def compile(source, config):
+    program = Program(config)
+    tree = ast.parse(source)
+
+    print(ast.dump(tree, indent=2))
+
+    for b in tree.body:
+        match b:
+            case ast.FunctionDef(name,_,_,_):
+                pass
+            case ast.Assign([ast.Name(target, _)],value):
+                define_variable(program, target, get_type(value), value)
+            case ast.AnnAssign(ast.Name(target, _),ast.Name(ann,_),value,_):
+                define_variable(program, target, ann, value)
+            case _:
+                raise RuntimeError(f'unhandled AST node {b}')
+
+    for b in tree.body:
+        match b:
+            case ast.FunctionDef(name,_,_,_):
+                program.symbols[name] = Symbol(name, 0, b'.text', len(program.codebuf))
+                # XYZ handle arguments
+                compile_body(b.body, program)
+                print(f'define function {name} at {len(program.codebuf)}')
+            # No need for further checks for valid values, it is done in the first loop
+
+    # XYZ Use source and config
     program.codebuf = bytebuf(bytes([ 0xb8, 0x01, 0x00, 0x00, 0x00, #                   mov    $SYS_write,%eax
                                       0xbf, 0x01, 0x00, 0x00, 0x00, #                   mov    $0x1,%edi
                                       0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, # lea    0x0,%rsi
@@ -358,16 +452,16 @@ def compile(source, program):
                                       0xbf, 0x00, 0x00, 0x00, 0x00, #                   mov    $0x0,%edi
                                       0x0f, 0x05 #                                      syscall
     ]))
-    program.rodatabuf = bytebuf(b'hello world\n')
-    program.databuf = bytebuf(b'\x00\x00\x00\x00')
     program.symbols = {
-        '_start': [ b'.text', 0 ],
+        'main': [ b'.text', 0 ],
         'hello': [ b'.rodata', 0 ]
     }
     program.relocations = [
-        [ '_start', b'.text', 0, x86_64_traits.reloc.none ],
+        [ 'main', b'.text', 0, x86_64_traits.reloc.none ],
         [ 'hello', b'.text', 14, x86_64_traits.reloc.abs4 ]
     ]
+
+    return program
 
 
 def elfgen(fname, program):
@@ -380,7 +474,7 @@ def elfgen(fname, program):
 
     ehdr = e.newehdr()
     ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
-    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if sys.byteorder == 'little' else e.ELFDATA2MSB
+    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if program.config.endian == 'little' else e.ELFDATA2MSB
     ehdr.contents.ident[e.EI_VERSION] = e.EV_CURRENT
     ehdr.contents.ident[e.EI_OSABI] = e.ELFOSABI_NONE
     ehdr.contents.ident[e.EI_ABIVERSION] = 0
@@ -398,10 +492,10 @@ def elfgen(fname, program):
     segments = [
         Segment(phdrs.code, [ 'Ehdr', b'.text' ], e.PF_R | e.PF_X)
     ]
-    need_rodata = hasattr(program, 'rodatabuf')
+    need_rodata = len(program.rodatabuf) > 0
     if need_rodata:
         segments[phdrs.code].sections.append(b'.rodata')
-    need_data = hasattr(program, 'databuf')
+    need_data = len(program.databuf) > 0
     if need_data:
         segments.append(Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W))
 
@@ -440,7 +534,7 @@ def elfgen(fname, program):
 
     ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
 
-    ehdr.contents.entry = program.symbols['_start'][1] if '_start' in program.symbols else codeshdr.contents.addr
+    ehdr.contents.entry = program.symbols['main'][1] if 'main' in program.symbols else codeshdr.contents.addr
 
     e.update(e.ELF_C_WRITE_MMAP)
 
@@ -448,10 +542,17 @@ def elfgen(fname, program):
 
     return e
 
+import ast
 def main(fname, *args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
-    program = Program(Config())
-    compile('', program)
+    source = r'''
+def main():
+    write('Hello World\n')
+    exit(status)
+status:int = 0
+a = 42
+'''
+    program = compile(source, Config())
     e = elfgen(fname, program)
     argv = (ctypes.c_char_p * (2 + len(args)))(fname, *args, ctypes.c_char_p())
     env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
