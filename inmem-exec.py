@@ -12,6 +12,28 @@ import dataclasses
 libc = ctypes.CDLL(None)
 
 
+@enum.unique
+class RelType(enum.Enum):
+    none = 0
+    abs4 = 1
+
+
+@dataclasses.dataclass
+class Symbol:
+    name: str
+    size: int
+    section: bytes
+    addr: int
+
+
+@dataclasses.dataclass
+class Relocation:
+    symref: str
+    section: bytes
+    offset: int
+    reltype: RelType
+
+
 class x86_64_encoding:
     rAX = 0b0000
     rCX = 0b0001
@@ -30,11 +52,6 @@ class x86_64_encoding:
     r14 = 0b1110
     r15 = 0b1111
 
-    @enum.unique
-    class reloc(enum.Enum):
-        none = 0
-        abs4 = 1
-
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
         rex = 0x41 if reg >= 8 else 0
@@ -51,7 +68,7 @@ class x86_64_encoding:
         # We always assume a small memory model, references are 4 bytes
         rex = 0x41 if reg >= 8 else 0
         res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
-        return res, (2 if rex else 1), x86_64_encoding.reloc.abs4
+        return res, (2 if rex else 1), RelType.abs4
 
 # OS traits
 class linux_traits(object):
@@ -245,8 +262,8 @@ class elf_x86_64_traits(x86_64_encoding):
     def __init__(self):
         pass
     def applyrelocations(self, e, reltab, symbols):
-        for symname, scnname, off, typ in reltab:
-            sym = symbols[symname]
+        for r in reltab:
+            sym = symbols[r.symref]
 
             defscnidx = e.sectionidx[sym.section]
             defscn = e.getscn(defscnidx)
@@ -254,19 +271,20 @@ class elf_x86_64_traits(x86_64_encoding):
             sym.addr += defshdr.contents.addr
             defval = sym.addr
 
-            refscnidx = e.sectionidx[scnname]
+            refscnidx = e.sectionidx[r.section]
             refscn = e.getscn(refscnidx)
             refdata = e.getdata(refscn, None)
+            off = r.offset
             while off >= refdata.contents.size:
                 off -= refdata.contents.size
                 refdata = e.getdata(refscn, refdata)
-            match typ:
-                case self.reloc.abs4:
+            match r.reltype:
+                case RelType.abs4:
                     assert off + 4 <= refdata.contents.size
                     buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + bytes([defval & 0xff, (defval >> 8) & 0xff, (defval >> 16) & 0xff, (defval >> 24) & 0xff]) + buf[off+4:]
                     refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
-                case self.reloc.none:
+                case RelType.none:
                     pass
                 case _:
                     raise ValueError('invalid relocation type')
@@ -469,13 +487,6 @@ class Config(object):
         return hasattr(self.arch_os_traits, 'SYS_' + name)
 
 
-@dataclasses.dataclass
-class Symbol:
-    name: str
-    size: int
-    section: bytes
-    addr: int
-
 class Program(Config):
     def __init__(self, arch_os_traits = None):
         super().__init__(arch_os_traits)
@@ -500,7 +511,8 @@ class Program(Config):
                 code, add, rel = self.arch_os_traits.gen_loadref(reg, a.addr)
                 add += len(self.codebuf)
                 self.codebuf += code
-                self.relocations.append([ a.name, b'.text', add, rel ])
+                # self.relocations.append([ a.name, b'.text', add, rel ])
+                self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
                 raise RuntimeError(f'unhandled syscall parameter type {type(a)}')
 
@@ -601,7 +613,7 @@ def compile(source, config = None):
                 compile_body(b.body, program)
             # No need for further checks for valid values, it is done in the first loop
 
-    program.relocations.append([ 'main', b'.text', 0, elf_x86_64_traits.reloc.none ])
+    program.relocations.append(Relocation('main', b'.text', 0, RelType.none))
 
     return program
 
