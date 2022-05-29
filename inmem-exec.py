@@ -282,7 +282,7 @@ class elf_x86_64_traits(x86_64_encoding):
                 case RelType.abs4:
                     assert off + 4 <= refdata.contents.size
                     buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
-                    buf = buf[:off] + bytes([defval & 0xff, (defval >> 8) & 0xff, (defval >> 16) & 0xff, (defval >> 24) & 0xff]) + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + defval).to_bytes(4, 'little') + buf[off+4:]
                     refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case RelType.none:
                     pass
@@ -511,7 +511,6 @@ class Program(Config):
                 code, add, rel = self.arch_os_traits.gen_loadref(reg, a.addr)
                 add += len(self.codebuf)
                 self.codebuf += code
-                # self.relocations.append([ a.name, b'.text', add, rel ])
                 self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
                 raise RuntimeError(f'unhandled syscall parameter type {type(a)}')
@@ -558,7 +557,7 @@ def define_variable(program, var, ann, value):
 def store_cstring(program, s):
     offset = len(program.rodatabuf)
     program.rodatabuf += bytes(s, program.encoding) + b'\x00'
-    id = program.gen_id()
+    id = program.gen_id('str')
     program.symbols[id] = Symbol(id, len(program.rodatabuf) - offset, b'.rodata', offset)
     return id
 
