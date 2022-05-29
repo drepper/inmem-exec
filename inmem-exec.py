@@ -39,6 +39,11 @@ class linux_x86_64_traits(linux_traits):
         libc.syscall(linux_x86_64_traits.SYS_execveat, fd, b'', argv, env, linux_x86_64_traits.AT_EMPTY_PATH)
 
 
+known_arch_os = {
+    ('Linux', 'x86_64'): linux_x86_64_traits
+}
+
+
 class elfstrtab(object):
     def __init__(self):
         self.s = b'\x00'
@@ -372,7 +377,7 @@ class Config(object):
         self.ps = resource.getpagesize()
         self.endian = sys.byteorder
         self.encoding = locale.getpreferredencoding()
-        self.arch_os_traits = arch_os_traits
+        self.arch_os_traits = arch_os_traits if arch_os_traits else Config.determine_machine()
         self.loadaddr = self.arch_os_traits.get_loadaddr()
 
     def create_elf(self, fname):
@@ -396,11 +401,15 @@ class Config(object):
         env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
         self.arch_os_traits.execute(self.e.fd, argv, env)
 
+    @staticmethod
+    def determine_machine():
+        return known_arch_os[platform.system(), platform.processor()]
+
 
 Symbol = collections.namedtuple('Symbol', 'name size section addr')
 
 class Program(Config):
-    def __init__(self, arch_os_traits):
+    def __init__(self, arch_os_traits = None):
         super().__init__(arch_os_traits)
         self.symbols = dict()
         self.codebuf = bytebuf()
@@ -466,7 +475,7 @@ def compile_body(body, program):
                 raise RuntimeError(f'unhandled function call {e}')
 
 
-def compile(source, config):
+def compile(source, config = None):
     program = Program(config)
     tree = ast.parse(source)
 
@@ -573,8 +582,6 @@ def elfgen(fname, program):
 
     e.end()
 
-    return e
-
 
 def main(fname, *args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
@@ -585,7 +592,7 @@ def main():
 status:int = 0
 a = 42
 '''
-    program = compile(source, linux_x86_64_traits())
+    program = compile(source)
     elfgen(fname, program)
     program.execute(args)
 
