@@ -7,7 +7,7 @@ import resource
 import sys
 import locale
 import ast
-import dataclasses
+from dataclasses import dataclass
 
 libc = ctypes.CDLL(None)
 
@@ -18,7 +18,7 @@ class RelType(enum.Enum):
     abs4 = 1
 
 
-@dataclasses.dataclass
+@dataclass
 class Symbol:
     name: str
     size: int
@@ -26,7 +26,7 @@ class Symbol:
     addr: int
 
 
-@dataclasses.dataclass
+@dataclass
 class Relocation:
     symref: str
     section: bytes
