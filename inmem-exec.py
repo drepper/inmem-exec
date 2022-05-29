@@ -460,11 +460,11 @@ class elf(elfdef):
 
 
 class Config(object):
-    def __init__(self, arch_os_traits):
+    def __init__(self, system, processor):
         self.ps = resource.getpagesize()
         self.endian = sys.byteorder
         self.encoding = locale.getpreferredencoding()
-        self.arch_os_traits = arch_os_traits if arch_os_traits else Config.determine_machine()
+        self.arch_os_traits = Config.determine_config(system, processor)
         self.loadaddr = self.arch_os_traits.get_loadaddr()
 
     def create_elf(self, fname):
@@ -489,16 +489,16 @@ class Config(object):
         self.arch_os_traits.execute(self.e.fd, argv, env)
 
     @staticmethod
-    def determine_machine():
-        return known_arch_os[platform.system(), platform.processor()]
+    def determine_config(system, processor):
+        return known_arch_os[system if system else platform.system(), processor if processor else platform.processor()]
 
     def known_syscall(self, name):
         return hasattr(self.arch_os_traits, 'SYS_' + name)
 
 
 class Program(Config):
-    def __init__(self, arch_os_traits = None):
-        super().__init__(arch_os_traits)
+    def __init__(self, system = None, processor = None):
+        super().__init__(system, processor)
         self.id = 0
         self.symbols = dict()
         self.relocations = list()
@@ -604,8 +604,8 @@ def compile_body(body, program):
                 raise RuntimeError(f'unhandled function call {e}')
 
 
-def compile(source, config = None):
-    program = Program(config)
+def compile(source, system = None, processor = None):
+    program = Program(system, processor)
     tree = ast.parse(source)
 
     print(ast.dump(tree, indent=2))
@@ -703,7 +703,7 @@ def main():
     exit(status)
 status:int = 0
 '''
-    program = compile(source)
+    program = compile(source, processor = 'x86_64')
     elfgen(fname, program)
     program.execute(args)
 
