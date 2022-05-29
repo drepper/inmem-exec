@@ -113,8 +113,6 @@ class elf32_traits(object):
     Word = ctypes.c_int32
     Xword = ctypes.c_int32
     Addr = ctypes.c_int32
-    codealign = 16
-    dataalign = 16
 
     def __init__(self):
         self.e = e
@@ -252,6 +250,8 @@ class elf64_traits(object):
         self.libelf.elf_begin.restype = (ctypes.c_void_p)
         self.libelf.elf64_newehdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf64_newehdr.restype = (ctypes.POINTER(elf64_ehdr))
+        self.libelf.elf64_getehdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf64_getehdr.restype = (ctypes.POINTER(elf64_ehdr))
         self.libelf.elf64_newphdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf64_newphdr.restype = (ctypes.POINTER(elf64_phdr))
         self.libelf.elf64_getshdr.argtypes = [ctypes.c_void_p]
@@ -262,6 +262,8 @@ class elf64_traits(object):
         self.phdr_type = elf64_phdr
     def newehdr(self, e):
         return self.libelf.elf64_newehdr(e)
+    def getehdr(self, e):
+        return self.libelf.elf64_getehdr(e)
     def newphdr(self, e, cnt):
         return ctypes.cast(self.libelf.elf64_newphdr(e, cnt), ctypes.POINTER(elf64_phdr * cnt))
     def getshdr(self, scn):
@@ -299,6 +301,8 @@ class elf(elfdef):
         return self.e != 0
     def newehdr(self):
         return self.traits.newehdr(self.e)
+    def getehdr(self):
+        return self.traits.getehdr(self.e)
     def newphdr(self, cnt):
         return self.traits.newphdr(self.e, cnt)
     def getshdr(self, scn):
@@ -371,12 +375,20 @@ class Config(object):
         self.arch_os_traits = arch_os_traits
         self.loadaddr = self.arch_os_traits.get_loadaddr()
 
-    def open_elf(self, fname):
+    def create_elf(self, fname):
         self.fname = fname
         fd = self.arch_os_traits.create_executable(self.fname)
         self.e = elf(self.arch_os_traits.nbits)
         if not self.e.open(fd):
             raise RuntimeError("cannot open elf")
+
+        ehdr = self.e.newehdr()
+        ehdr.contents.ident[self.e.EI_CLASS] = self.e.traits.elfclass
+        ehdr.contents.ident[self.e.EI_DATA] = self.e.ELFDATA2LSB if self.endian == 'little' else e.ELFDATA2MSB
+        ehdr.contents.ident[self.e.EI_OSABI] = self.e.ELFOSABI_NONE
+        ehdr.contents.type = self.e.ET_EXEC
+        ehdr.contents.machine = self.e.traits.machine
+
         return self.e
 
     def execute(self, args):
@@ -503,14 +515,7 @@ def compile(source, config):
 
 
 def elfgen(fname, program):
-    e = program.open_elf(fname)
-
-    ehdr = e.newehdr()
-    ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
-    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if program.endian == 'little' else e.ELFDATA2MSB
-    ehdr.contents.ident[e.EI_OSABI] = e.ELFOSABI_NONE
-    ehdr.contents.type = e.ET_EXEC
-    ehdr.contents.machine = e.traits.machine
+    e = program.create_elf(fname)
 
     @enum.unique
     class phdrs(enum.IntEnum):
@@ -560,8 +565,8 @@ def elfgen(fname, program):
 
     e.applyrelocations(program.relocations, program.symbols)
 
+    ehdr = e.getehdr()
     ehdr.contents.shstrndx = e.ndxscn(shstrscn)
-
     ehdr.contents.entry = program.symbols['main'][1] if 'main' in program.symbols else codeshdr.contents.addr
 
     e.update(e.ELF_C_WRITE_MMAP)
@@ -569,6 +574,7 @@ def elfgen(fname, program):
     e.end()
 
     return e
+
 
 def main(fname, *args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
