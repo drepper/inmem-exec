@@ -320,6 +320,8 @@ class elf(elfdef):
         return scn, shdr, data
     def getscn(self, ndx):
         return self.libelf.elf_getscn(self.e, ndx)
+    def ndxscn(self, scn):
+        return self.libelf.elf_ndxscn(scn)
     def newdata(self, scn):
         return self.libelf.elf_newdata(scn)
     def getdata(self, scn, data):
@@ -506,12 +508,9 @@ def elfgen(fname, program):
     ehdr = e.newehdr()
     ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
     ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if program.endian == 'little' else e.ELFDATA2MSB
-    ehdr.contents.ident[e.EI_VERSION] = e.EV_CURRENT
     ehdr.contents.ident[e.EI_OSABI] = e.ELFOSABI_NONE
-    ehdr.contents.ident[e.EI_ABIVERSION] = 0
     ehdr.contents.type = e.ET_EXEC
     ehdr.contents.machine = e.traits.machine
-    ehdr.contents.version = e.EV_CURRENT
 
     @enum.unique
     class phdrs(enum.IntEnum):
@@ -542,15 +541,13 @@ def elfgen(fname, program):
 
     shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', e.SHT_STRTAB, 0, e.shstrtab, 1)
 
-    size = e.update(e.ELF_C_NULL)
-
-    ps = program.ps
+    e.update(e.ELF_C_NULL)
 
     lastvaddr = program.loadaddr
     for s in segments:
-        lastvaddr = (lastvaddr + ps - 1) & ~(ps - 1)
+        lastvaddr = (lastvaddr + program.ps - 1) & ~(program.ps - 1)
         offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
-        assert((offset & (ps - 1)) == (addr & (ps - 1)))
+        assert((offset & (program.ps - 1)) == (addr & (program.ps - 1)))
         phdr.contents[s.idx].type = e.PT_LOAD
         phdr.contents[s.idx].flags = s.flags
         phdr.contents[s.idx].offset = offset
@@ -558,12 +555,12 @@ def elfgen(fname, program):
         phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
         phdr.contents[s.idx].filesz = filesz
         phdr.contents[s.idx].memsz = memsz
-        phdr.contents[s.idx].align = ps
+        phdr.contents[s.idx].align = program.ps
         lastvaddr = phdr.contents[s.idx].vaddr + phdr.contents[s.idx].memsz
 
     e.applyrelocations(program.relocations, program.symbols)
 
-    ehdr.contents.shstrndx = e.libelf.elf_ndxscn(shstrscn)
+    ehdr.contents.shstrndx = e.ndxscn(shstrscn)
 
     ehdr.contents.entry = program.symbols['main'][1] if 'main' in program.symbols else codeshdr.contents.addr
 
