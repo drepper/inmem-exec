@@ -5,16 +5,38 @@ import os
 import platform
 import resource
 import sys
+import locale
+import ast
 
 libc = ctypes.CDLL(None)
 
+
 # OS traits
-MFD_CLOEXEC = 1
-AT_EMPTY_PATH = 0x1000
+class linux_traits(object):
+    MFD_CLOEXEC = 1
+    AT_EMPTY_PATH = 0x1000
+
 
 # OS+CPU traits
-SYS_execveat = 322
-SYS_memfd_create = 319
+class linux_x86_64_traits(linux_traits):
+    nbits = 64                  # processor bits
+    SYS_execveat = 322
+    SYS_memfd_create = 319
+
+    @staticmethod
+    def get_loadaddr():
+        # XYZ add randomization
+        return 0x40000
+
+    @staticmethod
+    def create_executable(fname):
+        fd = libc.syscall(linux_x86_64_traits.SYS_memfd_create, fname, linux_x86_64_traits.MFD_CLOEXEC)
+        # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
+        return fd
+
+    @staticmethod
+    def execute(fd, argv, env):
+        libc.syscall(linux_x86_64_traits.SYS_execveat, fd, b'', argv, env, linux_x86_64_traits.AT_EMPTY_PATH)
 
 
 class elfstrtab(object):
@@ -340,11 +362,25 @@ class elf(elfdef):
 
 
 class Config(object):
-    def __init__(self):
+    def __init__(self, arch_os_traits):
         self.ps = resource.getpagesize()
         self.endian = sys.byteorder
-        self.encoding = 'UTF-8'
-    loadaddr = 0x40000
+        self.encoding = locale.getpreferredencoding()
+        self.arch_os_traits = arch_os_traits
+        self.loadaddr = self.arch_os_traits.get_loadaddr()
+
+    def open_elf(self, fname):
+        self.fname = fname
+        fd = self.arch_os_traits.create_executable(self.fname)
+        self.e = elf(self.arch_os_traits.nbits)
+        if not self.e.open(fd):
+            raise RuntimeError("cannot open elf")
+        return self.e
+
+    def execute(self, args):
+        argv = (ctypes.c_char_p * (2 + len(args)))(self.fname, *args, ctypes.c_char_p())
+        env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
+        self.arch_os_traits.execute(self.e.fd, argv, env)
 
 
 Symbol = collections.namedtuple('Symbol', 'name size section addr')
@@ -465,12 +501,7 @@ def compile(source, config):
 
 
 def elfgen(fname, program):
-    e = elf(64)
-
-    fd = libc.syscall(SYS_memfd_create, fname, MFD_CLOEXEC)
-    # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
-    if not e.open(fd):
-        raise RuntimeError("cannot open elf")
+    e = program.config.open_elf(fname)
 
     ehdr = e.newehdr()
     ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
@@ -542,7 +573,6 @@ def elfgen(fname, program):
 
     return e
 
-import ast
 def main(fname, *args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
     source = r'''
@@ -552,11 +582,10 @@ def main():
 status:int = 0
 a = 42
 '''
-    program = compile(source, Config())
-    e = elfgen(fname, program)
-    argv = (ctypes.c_char_p * (2 + len(args)))(fname, *args, ctypes.c_char_p())
-    env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
-    libc.syscall(SYS_execveat, e.fd, b'', argv, env, AT_EMPTY_PATH)
+    program = compile(source, Config(linux_x86_64_traits()))
+    elfgen(fname, program)
+    program.config.execute(args)
+
 
 if __name__ == '__main__':
     main(b'test')
