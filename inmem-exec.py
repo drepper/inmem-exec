@@ -256,6 +256,7 @@ class elf64_shdr(ctypes.Structure):
         ('entsize', ctypes.c_uint64)
     ]
 
+
 class elf_x86_64_traits(x86_64_encoding):
     codealign = 16
     dataalign = 16
@@ -508,7 +509,7 @@ class Program(Config):
             case int(val):
                 self.codebuf += self.arch_os_traits.gen_loadimm(reg, val)
             case Symbol(_):
-                code, add, rel = self.arch_os_traits.gen_loadref(reg, a.addr)
+                code, add, rel = self.arch_os_traits.gen_loadref(reg, 0)
                 add += len(self.codebuf)
                 self.codebuf += code
                 self.relocations.append(Relocation(a.name, b'.text', add, rel))
@@ -682,6 +683,7 @@ def main(fname, *args):
     source = r'''
 def main():
     write(1, 'Hello World\n', 12)
+    write(1, 'Good Bye\n', 9)
     exit(0)
 status:int = 0
 a = 42
