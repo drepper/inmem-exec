@@ -385,9 +385,9 @@ class Config(object):
 
 Symbol = collections.namedtuple('Symbol', 'name size section addr')
 
-class Program(object):
-    def __init__(self, config):
-        self.config = config
+class Program(Config):
+    def __init__(self, arch_os_traits):
+        super().__init__(arch_os_traits)
         self.symbols = dict()
         self.codebuf = bytebuf()
         self.rodatabuf = bytebuf()
@@ -415,19 +415,19 @@ def define_variable(program, var, ann, value):
     addr = len(program.databuf)
     if addr % size != 0:
         npad = size * ((addr + size - 1) // size) - addr
-        program.databuf += (0).to_bytes(npad, program.config.endian)
+        program.databuf += (0).to_bytes(npad, program.endian)
         addr += npad
     program.symbols[var] = Symbol(var, size, b'.data', addr)
     match value:
         case ast.Constant(v) if type(v) == int:
-            program.databuf += v.to_bytes(size, program.config.endian)
+            program.databuf += v.to_bytes(size, program.endian)
         case _:
             raise RuntimeError('invalid variable value')
 
 
 def store_cstring(program, s):
     offset = len(program.rodatabuf)
-    program.rodatabuf += bytes(s, program.config.encoding) + b'\x00'
+    program.rodatabuf += bytes(s, program.encoding) + b'\x00'
     return '.rodata', offset
 
 
@@ -501,11 +501,11 @@ def compile(source, config):
 
 
 def elfgen(fname, program):
-    e = program.config.open_elf(fname)
+    e = program.open_elf(fname)
 
     ehdr = e.newehdr()
     ehdr.contents.ident[e.EI_CLASS] = e.traits.elfclass
-    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if program.config.endian == 'little' else e.ELFDATA2MSB
+    ehdr.contents.ident[e.EI_DATA] = e.ELFDATA2LSB if program.endian == 'little' else e.ELFDATA2MSB
     ehdr.contents.ident[e.EI_VERSION] = e.EV_CURRENT
     ehdr.contents.ident[e.EI_OSABI] = e.ELFOSABI_NONE
     ehdr.contents.ident[e.EI_ABIVERSION] = 0
@@ -544,9 +544,9 @@ def elfgen(fname, program):
 
     size = e.update(e.ELF_C_NULL)
 
-    ps = program.config.ps
+    ps = program.ps
 
-    lastvaddr = program.config.loadaddr
+    lastvaddr = program.loadaddr
     for s in segments:
         lastvaddr = (lastvaddr + ps - 1) & ~(ps - 1)
         offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
@@ -582,9 +582,9 @@ def main():
 status:int = 0
 a = 42
 '''
-    program = compile(source, Config(linux_x86_64_traits()))
+    program = compile(source, linux_x86_64_traits())
     elfgen(fname, program)
-    program.config.execute(args)
+    program.execute(args)
 
 
 if __name__ == '__main__':
