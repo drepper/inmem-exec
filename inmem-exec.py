@@ -64,6 +64,14 @@ class x86_64_encoding:
         return res
 
     @staticmethod
+    def gen_loadmem(reg, width):
+        rex = 0x44 if reg >= 8 else 0
+        if width > 4:
+            rex |= 0x48
+        res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + (0).to_bytes(width, 'little')
+        return res, (4 if rex else 3), RelType.abs4
+
+    @staticmethod
     def gen_loadref(reg, offset):
         # We always assume a small memory model, references are 4 bytes
         rex = 0x41 if reg >= 8 else 0
@@ -503,22 +511,29 @@ class Program(Config):
         self.id += 1
         return res
 
-    def gen_load_syscall_arg(self, n, a):
-        reg = self.arch_os_traits.get_syscall_arg_reg(n)
+    def gen_load_arg(self, is_syscall, n, a):
+        reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
         match a:
             case int(val):
                 self.codebuf += self.arch_os_traits.gen_loadimm(reg, val)
+            case Symbol(_):
+                code, add, rel = self.arch_os_traits.gen_loadmem(reg, 4)
+                add += len(self.codebuf)
+                self.codebuf += code
+                self.relocations.append(Relocation(a.name, b'.text', add, rel))
+            case _:
+                raise RuntimeError(f'unhandled parameter type {type(a)}')
+
+    def gen_load_ref(self, is_syscall, n, a):
+        reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
+        match a:
             case Symbol(_):
                 code, add, rel = self.arch_os_traits.gen_loadref(reg, 0)
                 add += len(self.codebuf)
                 self.codebuf += code
                 self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
-                raise RuntimeError(f'unhandled syscall parameter type {type(a)}')
-
-    def gen_load_function_arg(self, n, a):
-        # XYZ todo
-        pass
+                raise RuntimeError(f'unhandled parameter type {type(a)}')
 
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
@@ -568,15 +583,16 @@ def compile_body(body, program):
         match e:
             case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
                 is_syscall = program.known_syscall(name)
-                gen_load_arg = lambda idx, val: program.gen_load_syscall_arg(idx, val) if is_syscall else program.gen_load_function_arg(idx, val)
 
                 for idx, a in enumerate(args):
                     match a:
                         case ast.Constant(s) if type(s) == int:
-                            gen_load_arg(idx, s)
+                            program.gen_load_arg(is_syscall, idx, s)
                         case ast.Constant(s) if type(s) == str:
                             id = store_cstring(program, s)
-                            gen_load_arg(idx, program.symbols[id])
+                            program.gen_load_ref(is_syscall, idx, program.symbols[id])
+                        case ast.Name(id,_):
+                            program.gen_load_arg(is_syscall, idx, program.symbols[id])
                         case _:
                             raise RuntimeError(f'unhandled function parameter type {a}')
                 if is_syscall:
@@ -684,9 +700,8 @@ def main(fname, *args):
 def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
-    exit(0)
+    exit(status)
 status:int = 0
-a = 42
 '''
     program = compile(source)
     elfgen(fname, program)
