@@ -7,24 +7,55 @@ import resource
 import sys
 import locale
 import ast
+import dataclasses
 
 libc = ctypes.CDLL(None)
 
 
+class x86_64_encoding:
+    rAX = 0b0000
+    rCX = 0b0001
+    rDX = 0b0010
+    rBX = 0b0011
+    rSP = 0b0100
+    rBP = 0b0101
+    rSI = 0b0110
+    rDI = 0b0111
+    r8  = 0b1000
+    r9  = 0b1001
+    r10 = 0b1010
+    r11 = 0b1011
+    r12 = 0b1100
+    r13 = 0b1101
+    r14 = 0b1110
+    r15 = 0b1111
+
+    @enum.unique
+    class reloc(enum.Enum):
+        none = 0
+        abs4 = 1
+
+    @staticmethod
+    def gen_loadimm(reg, val, width = 0, signed = False):
+        rex = 0x41 if reg >= 8 else 0
+        if (val < -2147483648 or val > 2147483647) if signed else val > 4294967295:
+            rex |= 0x48
+            valwidth = 8
+        else:
+            valwidth = 4
+        res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + val.to_bytes(valwidth, 'little')
+        return res
+
+    @staticmethod
+    def gen_loadref(reg, offset):
+        # We always assume a small memory model, references are 4 bytes
+        rex = 0x41 if reg >= 8 else 0
+        res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
+        return res, (2 if rex else 1), x86_64_encoding.reloc.abs4
+
 # OS traits
 class linux_traits(object):
     AT_EMPTY_PATH = 0x1000
-
-
-# OS+CPU traits
-class linux_x86_64_traits(linux_traits):
-    nbits = 64                  # processor bits
-    SYS_execveat = 322
-
-    @staticmethod
-    def get_loadaddr():
-        # XYZ add randomization
-        return 0x40000
 
     @staticmethod
     def create_executable(fname):
@@ -33,8 +64,43 @@ class linux_x86_64_traits(linux_traits):
         return fd
 
     @staticmethod
+    def execute(snr, fd, argv, env):
+        libc.syscall(snr, fd, b'', argv, env, linux_x86_64_traits.AT_EMPTY_PATH)
+
+
+# OS+CPU traits
+class linux_x86_64_traits(linux_traits, x86_64_encoding):
+    nbits = 64           # processor bits
+    SYS_write = 1
+    SYS_exit = 231       # actually SYS_exit_group
+    SYS_execveat = 322
+
+    @staticmethod
+    def get_loadaddr():
+        # XYZ add randomization
+        return 0x40000
+
+    @staticmethod
     def execute(fd, argv, env):
-        libc.syscall(linux_x86_64_traits.SYS_execveat, fd, b'', argv, env, linux_x86_64_traits.AT_EMPTY_PATH)
+        linux_traits.execute(linux_x86_64_traits.SYS_execveat, fd, argv, env)
+
+    syscall_arg_regs = [
+        x86_64_encoding.rDI,
+        x86_64_encoding.rSI,
+        x86_64_encoding.rDX,
+        x86_64_encoding.r10,
+        x86_64_encoding.r8,
+        x86_64_encoding.r9
+    ]
+    @staticmethod
+    def get_syscall_arg_reg(nr):
+        return linux_x86_64_traits.syscall_arg_regs[nr]
+
+    @staticmethod
+    def gen_syscall(nr):
+        res = x86_64_encoding.gen_loadimm(x86_64_encoding.rAX, nr)
+        res += b'\x0f\x05'                          # syscall
+        return res
 
 
 known_arch_os = {
@@ -173,11 +239,7 @@ class elf64_shdr(ctypes.Structure):
         ('entsize', ctypes.c_uint64)
     ]
 
-class x86_64_traits(object):
-    @enum.unique
-    class reloc(enum.Enum):
-        none = 0
-        abs4 = 1
+class elf_x86_64_traits(x86_64_encoding):
     codealign = 16
     dataalign = 16
     def __init__(self):
@@ -186,11 +248,11 @@ class x86_64_traits(object):
         for symname, scnname, off, typ in reltab:
             sym = symbols[symname]
 
-            defscnidx = e.sectionidx[sym[0]]
+            defscnidx = e.sectionidx[sym.section]
             defscn = e.getscn(defscnidx)
             defshdr = e.getshdr(defscn)
-            sym[1] += defshdr.contents.addr
-            defval = sym[1]
+            sym.addr += defshdr.contents.addr
+            defval = sym.addr
 
             refscnidx = e.sectionidx[scnname]
             refscn = e.getscn(refscnidx)
@@ -239,7 +301,7 @@ class elfdef(object):
     PF_X = 1
 
 machtraits_64 = {
-    elfdef.EM_X86_64: x86_64_traits
+    elfdef.EM_X86_64: elf_x86_64_traits
 }
 
 class elf64_traits(object):
@@ -403,16 +465,51 @@ class Config(object):
     def determine_machine():
         return known_arch_os[platform.system(), platform.processor()]
 
+    def known_syscall(self, name):
+        return hasattr(self.arch_os_traits, 'SYS_' + name)
 
-Symbol = collections.namedtuple('Symbol', 'name size section addr')
+
+@dataclasses.dataclass
+class Symbol:
+    name: str
+    size: int
+    section: bytes
+    addr: int
 
 class Program(Config):
     def __init__(self, arch_os_traits = None):
         super().__init__(arch_os_traits)
+        self.id = 0
         self.symbols = dict()
+        self.relocations = list()
         self.codebuf = bytebuf()
         self.rodatabuf = bytebuf()
         self.databuf = bytebuf()
+
+    def gen_id(self, prefix = ''):
+        res = '.L' + prefix + str(self.id)
+        self.id += 1
+        return res
+
+    def gen_load_syscall_arg(self, n, a):
+        reg = self.arch_os_traits.get_syscall_arg_reg(n)
+        match a:
+            case int(val):
+                self.codebuf += self.arch_os_traits.gen_loadimm(reg, val)
+            case Symbol(_):
+                code, add, rel = self.arch_os_traits.gen_loadref(reg, a.addr)
+                add += len(self.codebuf)
+                self.codebuf += code
+                self.relocations.append([ a.name, b'.text', add, rel ])
+            case _:
+                raise RuntimeError(f'unhandled syscall parameter type {type(a)}')
+
+    def gen_load_function_arg(self, n, a):
+        # XYZ todo
+        pass
+
+    def gen_syscall(self, nr, *args):
+        self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
 
 
 def get_type(value):
@@ -430,7 +527,7 @@ def define_variable(program, var, ann, value):
         case 'int':
             size = 4
         case 'long' | 'ptr':
-            size = 8 # XYZ
+            size = program.arch_os_traits.nbits / 8
         case _:
             raise RuntimeError('invalid annotation')
     addr = len(program.databuf)
@@ -449,26 +546,32 @@ def define_variable(program, var, ann, value):
 def store_cstring(program, s):
     offset = len(program.rodatabuf)
     program.rodatabuf += bytes(s, program.encoding) + b'\x00'
-    return '.rodata', offset
+    id = program.gen_id()
+    program.symbols[id] = Symbol(id, len(program.rodatabuf) - offset, b'.rodata', offset)
+    return id
 
 
 def compile_body(body, program):
     for e in body:
         match e:
-            case ast.Expr(ast.Call(ast.Name('write',_),args,[])):
-                fd = 1
-                if len(args) > 1 and type(args[0]) == int:
-                    fd = args[0]
-                    args = args[1:]
-                for a in args:
+            case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
+                is_syscall = program.known_syscall(name)
+                gen_load_arg = lambda idx, val: program.gen_load_syscall_arg(idx, val) if is_syscall else program.gen_load_function_arg(idx, val)
+
+                for idx, a in enumerate(args):
                     match a:
+                        case ast.Constant(s) if type(s) == int:
+                            gen_load_arg(idx, s)
                         case ast.Constant(s) if type(s) == str:
-                            section, offset = store_cstring(program, s)
+                            id = store_cstring(program, s)
+                            gen_load_arg(idx, program.symbols[id])
                         case _:
-                            raise RuntimeError(f'unhandled write parameter type {a}')
-                print(f'call write with {len(args)} arguments')
-            case ast.Expr(ast.Call(ast.Name('exit',_),[arg],[])):
-                print(f'call exit with {arg}')
+                            raise RuntimeError(f'unhandled function parameter type {a}')
+                if is_syscall:
+                    program.gen_syscall(name, *args)
+                else:
+                    # XYZ generate code
+                    print(f'function {name} with {len(args)} arguments')
             case _:
                 raise RuntimeError(f'unhandled function call {e}')
 
@@ -496,27 +599,9 @@ def compile(source, config = None):
                 program.symbols[name] = Symbol(name, 0, b'.text', len(program.codebuf))
                 # XYZ handle arguments
                 compile_body(b.body, program)
-                print(f'define function {name} at {len(program.codebuf)}')
             # No need for further checks for valid values, it is done in the first loop
 
-    # XYZ Use source and config
-    program.codebuf = bytebuf(bytes([ 0xb8, 0x01, 0x00, 0x00, 0x00, #                   mov    $SYS_write,%eax
-                                      0xbf, 0x01, 0x00, 0x00, 0x00, #                   mov    $0x1,%edi
-                                      0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, # lea    0x0,%rsi
-                                      0xba, 0x0c, 0x00, 0x00, 0x00, #                   mov    $0xc,%edx
-                                      0x0f, 0x05, #                                     syscall
-                                      0xb8, 0xe7, 0x00, 0x00, 0x00, #                   mov    $SYS_exit_group,%eax
-                                      0xbf, 0x00, 0x00, 0x00, 0x00, #                   mov    $0x0,%edi
-                                      0x0f, 0x05 #                                      syscall
-    ]))
-    program.symbols = {
-        'main': [ b'.text', 0 ],
-        'hello': [ b'.rodata', 0 ]
-    }
-    program.relocations = [
-        [ 'main', b'.text', 0, x86_64_traits.reloc.none ],
-        [ 'hello', b'.text', 14, x86_64_traits.reloc.abs4 ]
-    ]
+    program.relocations.append([ 'main', b'.text', 0, elf_x86_64_traits.reloc.none ])
 
     return program
 
@@ -574,7 +659,7 @@ def elfgen(fname, program):
 
     ehdr = e.getehdr()
     ehdr.contents.shstrndx = e.ndxscn(shstrscn)
-    ehdr.contents.entry = program.symbols['main'][1] if 'main' in program.symbols else codeshdr.contents.addr
+    ehdr.contents.entry = program.symbols['main'].addr if 'main' in program.symbols else codeshdr.contents.addr
 
     e.update(e.ELF_C_WRITE_MMAP)
 
@@ -585,8 +670,8 @@ def main(fname, *args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
     source = r'''
 def main():
-    write('Hello World\n')
-    exit(status)
+    write(1, 'Hello World\n', 12)
+    exit(0)
 status:int = 0
 a = 42
 '''
