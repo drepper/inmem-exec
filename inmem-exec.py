@@ -13,7 +13,6 @@ libc = ctypes.CDLL(None)
 
 # OS traits
 class linux_traits(object):
-    MFD_CLOEXEC = 1
     AT_EMPTY_PATH = 0x1000
 
 
@@ -21,7 +20,6 @@ class linux_traits(object):
 class linux_x86_64_traits(linux_traits):
     nbits = 64                  # processor bits
     SYS_execveat = 322
-    SYS_memfd_create = 319
 
     @staticmethod
     def get_loadaddr():
@@ -30,7 +28,7 @@ class linux_x86_64_traits(linux_traits):
 
     @staticmethod
     def create_executable(fname):
-        fd = libc.syscall(linux_x86_64_traits.SYS_memfd_create, fname, linux_x86_64_traits.MFD_CLOEXEC)
+        fd = os.memfd_create(fname, os.MFD_CLOEXEC)
         # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
         return fd
 
