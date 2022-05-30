@@ -188,6 +188,49 @@ class rv32_encoding:
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
 
+class rv64_encoding:
+    nbits = 64           # processor bits
+    elf_machine = elfdef.EM_RISCV
+
+    rA0 = 0b01010
+    rA1 = 0b01011
+    rA2 = 0b01100
+    rA3 = 0b01101
+    rA4 = 0b01110
+    rA5 = 0b01111
+    rA6 = 0b10000
+    rA7 = 0b10001
+
+    @staticmethod
+    def gen_loadimm(reg, val, width = 0, signed = False):
+        if val >= -2048 and val < 2048:
+            word = ((val & 0xfff) << 20) | (reg << 7) | 0b0010011
+            res = word.to_bytes(4, 'little')
+        else:
+            word1 = (val & 0xfffff000) | (reg << 7) | 0b0110111
+            word2 = ((val & 0xfff) << 20) | (reg << 15) | (reg << 7) | 0b0010011
+            res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
+        return res
+
+    @staticmethod
+    def gen_loadmem(reg, width, signed = False):
+        word1 = (reg << 7) | 0b0110111
+        res1 = word1.to_bytes(4, 'little')
+        logwidth = math.frexp(width)[1] - 1
+        word2 = (reg << 15) | ((logwidth | (0 if signed or width == 8 else 0b100)) << 12) | (reg << 7) | 0b0000011
+        res2 = word2.to_bytes(4, 'little')
+        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+
+    @staticmethod
+    def gen_loadref(reg, offset):
+        # We always assume a small memory model, references are 4 bytes
+        word1 = (reg << 7) | 0b0110111
+        res1 = word1.to_bytes(4, 'little')
+        word2 = (reg << 15) | (reg << 7) | 0b0010011
+        res2 = word2.to_bytes(4, 'little')
+        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+
+
 # OS traits
 class linux_traits(object):
     @staticmethod
@@ -303,10 +346,46 @@ class linux_rv32_traits(linux_traits, rv32_encoding):
         return res
 
 
+class linux_rv64_traits(linux_traits, rv64_encoding):
+    SYS_write = 64
+    SYS_exit = 94       # actually SYS_exit_group
+
+    @staticmethod
+    def get_loadaddr():
+        # XYZ add randomization
+        return 0x40000
+
+    @staticmethod
+    def get_endian():
+        return elfdef.ELFDATA2LSB
+    @staticmethod
+    def get_endian_str():
+        return 'little'
+
+    syscall_arg_regs = [
+        rv32_encoding.rA0,
+        rv32_encoding.rA1,
+        rv32_encoding.rA2,
+        rv32_encoding.rA3,
+        rv32_encoding.rA4,
+        rv32_encoding.rA5
+    ]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
+
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.rA7, nr)
+        res += (0x00000073).to_bytes(4, 'little')     # scall
+        return res
+
+
 known_arch_os = {
     ('Linux', 'x86_64'): linux_x86_64_traits,
     ('Linux', 'i686'): linux_i386_traits,
     ('Linux', 'rv32g'): linux_rv32_traits,
+    ('Linux', 'rv64g'): linux_rv64_traits,
 }
 
 
