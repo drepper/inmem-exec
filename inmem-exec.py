@@ -1,4 +1,4 @@
-import collections
+import math
 import ctypes
 import enum
 import os
@@ -8,6 +8,7 @@ import sys
 import locale
 import ast
 from dataclasses import dataclass
+import collections
 
 libc = ctypes.CDLL(None)
 
@@ -16,6 +17,8 @@ libc = ctypes.CDLL(None)
 class RelType(enum.Enum):
     none = 0
     abs4 = 1
+    rvhi = 2
+    rvlo = 3
 
 
 @dataclass
@@ -51,6 +54,8 @@ class elfdef(object):
     EM_386 = 3
     EM_ARM = 40
     EM_X86_64 = 62
+    EM_AARCH64 = 183
+    EM_RISCV = 243
     SHT_PROGBITS = 1
     SHT_STRTAB = 3
     SHF_WRITE = 1
@@ -103,14 +108,14 @@ class x86_64_encoding:
         if width > 4:
             rex |= 0x48
         res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
-        return res, (4 if rex else 3), RelType.abs4
+        return [ (res, (4 if rex else 3), RelType.abs4) ]
 
     @staticmethod
     def gen_loadref(reg, offset):
         # We always assume a small memory model, references are 4 bytes
         rex = 0x41 if reg >= 8 else 0
         res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
-        return res, (2 if rex else 1), RelType.abs4
+        return [ (res, (2 if rex else 1), RelType.abs4) ]
 
 
 class i386_encoding:
@@ -134,13 +139,59 @@ class i386_encoding:
     @staticmethod
     def gen_loadmem(reg, width):
         res = b'\x8b' + (0x05 + (reg << 3)).to_bytes(1, 'little') + b'\x00\x00\x00\x00'
-        return res, 2, RelType.abs4
+        return [ (res, 2, RelType.abs4) ]
 
     @staticmethod
     def gen_loadref(reg, offset):
         # We always assume a small memory model, references are 4 bytes
         res = (0xb8 + reg).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
-        return res, 1, RelType.abs4
+        return [ (res, 1, RelType.abs4) ]
+
+
+class rv32_encoding:
+    nbits = 32           # processor bits
+    elf_machine = elfdef.EM_RISCV
+
+    rA0 = 0b01010
+    rA1 = 0b01011
+    rA2 = 0b01100
+    rA3 = 0b01101
+    rA4 = 0b01110
+    rA5 = 0b01111
+    rA6 = 0b10000
+    rA7 = 0b10001
+
+    @staticmethod
+    def gen_loadimm(reg, val, width = 0, signed = False):
+        if val >= -2048 and val < 2048:
+            word = ((val & 0xfff) << 20) | (reg << 7) | 0b0010011
+            res = word.to_bytes(4, 'little')
+        else:
+            word1 = (val & 0xfffff000) | (reg << 7) | 0b0110111
+            word2 = ((val & 0xfff) << 20) | (reg << 15) | (reg << 7) | 0b0010011
+            res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
+        return res
+
+    @staticmethod
+    def gen_loadmem(reg, width, signed = False):
+        word1 = (reg << 7) | 0b0110111
+        res1 = word1.to_bytes(4, 'little')
+        logwidth = math.frexp(width)[1] - 1
+        if signed or width == 4:
+            word2 = (reg << 15) | (logwidth << 12) | (reg << 7) | 0b0000011
+        else:
+            word2 = (reg << 15) | ((logwidth | 0b100) << 12) | (reg << 7) | 0b0000011
+        res2 = word2.to_bytes(4, 'little')
+        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+
+    @staticmethod
+    def gen_loadref(reg, offset):
+        # We always assume a small memory model, references are 4 bytes
+        word1 = (reg << 7) | 0b0110111
+        res1 = word1.to_bytes(4, 'little')
+        word2 = (reg << 15) | (reg << 7) | 0b0010011
+        res2 = word2.to_bytes(4, 'little')
+        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
 
 # OS traits
@@ -162,6 +213,13 @@ class linux_x86_64_traits(linux_traits, x86_64_encoding):
         # XYZ add randomization
         return 0x40000
 
+    @staticmethod
+    def get_endian():
+        return elfdef.ELFDATA2LSB
+    @staticmethod
+    def get_endian_str():
+        return 'little'
+
     syscall_arg_regs = [
         x86_64_encoding.rDI,
         x86_64_encoding.rSI,
@@ -170,13 +228,13 @@ class linux_x86_64_traits(linux_traits, x86_64_encoding):
         x86_64_encoding.r8,
         x86_64_encoding.r9
     ]
-    @staticmethod
-    def get_syscall_arg_reg(nr):
-        return linux_x86_64_traits.syscall_arg_regs[nr]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
 
-    @staticmethod
-    def gen_syscall(nr):
-        res = x86_64_encoding.gen_loadimm(x86_64_encoding.rAX, nr)
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.rAX, nr)
         res += b'\x0f\x05'                          # syscall
         return res
 
@@ -190,6 +248,13 @@ class linux_i386_traits(linux_traits, i386_encoding):
         # XYZ add randomization
         return 0x40000
 
+    @staticmethod
+    def get_endian():
+        return elfdef.ELFDATA2LSB
+    @staticmethod
+    def get_endian_str():
+        return 'little'
+
     syscall_arg_regs = [
         i386_encoding.rBX,
         i386_encoding.rCX,
@@ -198,20 +263,56 @@ class linux_i386_traits(linux_traits, i386_encoding):
         i386_encoding.rDI,
         i386_encoding.rBP
     ]
-    @staticmethod
-    def get_syscall_arg_reg(nr):
-        return linux_i386_traits.syscall_arg_regs[nr]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
+
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.rAX, nr)
+        res += b'\xcd\x80'                          # int $0x80
+        return res
+
+
+class linux_rv32_traits(linux_traits, rv32_encoding):
+    SYS_write = 64
+    SYS_exit = 94       # actually SYS_exit_group
 
     @staticmethod
-    def gen_syscall(nr):
-        res = i386_encoding.gen_loadimm(i386_encoding.rAX, nr)
-        res += b'\xcd\x80'                          # int $0x80
+    def get_loadaddr():
+        # XYZ add randomization
+        return 0x40000
+
+    @staticmethod
+    def get_endian():
+        return elfdef.ELFDATA2LSB
+    @staticmethod
+    def get_endian_str():
+        return 'little'
+
+    syscall_arg_regs = [
+        rv32_encoding.rA0,
+        rv32_encoding.rA1,
+        rv32_encoding.rA2,
+        rv32_encoding.rA3,
+        rv32_encoding.rA4,
+        rv32_encoding.rA5
+    ]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
+
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.rA7, nr)
+        res += (0x00000073).to_bytes(4, 'little')     # scall
         return res
 
 
 known_arch_os = {
     ('Linux', 'x86_64'): linux_x86_64_traits,
     ('Linux', 'i686'): linux_i386_traits,
+    ('Linux', 'rv32g'): linux_rv32_traits,
 }
 
 
@@ -355,8 +456,14 @@ class elf_i386_traits(i386_encoding):
     dataalign = 16
 
 
+class elf_rv32_traits(rv32_encoding):
+    codealign = 16
+    dataalign = 16
+
+
 machtraits_32 = {
     elfdef.EM_386: elf_i386_traits,
+    elfdef.EM_RISCV: elf_rv32_traits,
 }
 
 
@@ -490,33 +597,49 @@ class elf(elfdef):
         return self.libelf.elf_update(self.e, cmd)
     def end(self):
         return self.libelf.elf_end(self.e)
-    def applyrelocations(self, reltab, symbols):
+
+    def update_symbols(self, symbols):
+        for s in symbols:
+            secname = symbols[s].section
+            if secname:
+                scnidx = self.sectionidx[secname]
+                scn = self.getscn(scnidx)
+                shdr = self.getshdr(scn)
+                symbols[s].addr += shdr.contents.addr
+
+    def apply_relocations(self, reltab, symbols):
         for r in reltab:
-            sym = symbols[r.symref]
-
-            defscnidx = self.sectionidx[sym.section]
-            defscn = self.getscn(defscnidx)
-            defshdr = self.getshdr(defscn)
-            sym.addr += defshdr.contents.addr
-            defval = sym.addr
-
+            defval = symbols[r.symref].addr
             refscnidx = self.sectionidx[r.section]
             refscn = self.getscn(refscnidx)
             refdata = self.getdata(refscn, None)
+
             off = r.offset
             while off >= refdata.contents.size:
                 off -= refdata.contents.size
                 refdata = self.getdata(refscn, refdata)
+
             match r.reltype:
                 case RelType.abs4:
                     assert off + 4 <= refdata.contents.size
                     buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + defval).to_bytes(4, 'little') + buf[off+4:]
                     refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case RelType.rvhi:
+                    assert off + 4 <= refdata.contents.size
+                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + (defval & 0xfffff000)).to_bytes(4, 'little') + buf[off+4:]
+                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case RelType.rvlo:
+                    assert off + 4 <= refdata.contents.size
+                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfff) << 20)).to_bytes(4, 'little') + buf[off+4:]
+                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case RelType.none:
                     pass
                 case _:
                     raise ValueError('invalid relocation type')
+
     def firstlastaddr(self, names, loadaddr):
         offset = -1
         addr = -1
@@ -542,7 +665,6 @@ class elf(elfdef):
 class Config(object):
     def __init__(self, system, processor):
         self.ps = resource.getpagesize()
-        self.endian = sys.byteorder
         self.encoding = locale.getpreferredencoding()
         self.arch_os_traits = Config.determine_config(system, processor)
         self.loadaddr = self.arch_os_traits.get_loadaddr()
@@ -556,7 +678,7 @@ class Config(object):
 
         ehdr = self.e.newehdr()
         ehdr.contents.ident[self.e.EI_CLASS] = self.e.traits.elfclass
-        ehdr.contents.ident[self.e.EI_DATA] = self.e.ELFDATA2LSB if self.endian == 'little' else e.ELFDATA2MSB
+        ehdr.contents.ident[self.e.EI_DATA] = self.arch_os_traits.get_endian()
         ehdr.contents.ident[self.e.EI_OSABI] = self.e.ELFOSABI_NONE
         ehdr.contents.type = self.e.ET_EXEC
         ehdr.contents.machine = self.e.traits.machine
@@ -606,10 +728,11 @@ class Program(Config):
             case int(val):
                 self.codebuf += self.arch_os_traits.gen_loadimm(reg, val)
             case Symbol(_):
-                code, add, rel = self.arch_os_traits.gen_loadmem(reg, self.symbols[a.name].size)
-                add += len(self.codebuf)
-                self.codebuf += code
-                self.relocations.append(Relocation(a.name, b'.text', add, rel))
+                for code, add, rel in self.arch_os_traits.gen_loadmem(reg, self.symbols[a.name].size):
+                    add += len(self.codebuf)
+                    self.codebuf += code
+                    if rel != RelType.none:
+                        self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
 
@@ -617,10 +740,11 @@ class Program(Config):
         reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
         match a:
             case Symbol(_):
-                code, add, rel = self.arch_os_traits.gen_loadref(reg, 0)
-                add += len(self.codebuf)
-                self.codebuf += code
-                self.relocations.append(Relocation(a.name, b'.text', add, rel))
+                for code, add, rel in self.arch_os_traits.gen_loadref(reg, 0):
+                    add += len(self.codebuf)
+                    self.codebuf += code
+                    if rel != RelType.none:
+                        self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
 
@@ -654,7 +778,7 @@ def define_variable(program, var, ann, value):
     program.symbols[var] = Symbol(var, size, b'.data', addr)
     match value:
         case ast.Constant(v) if type(v) == int:
-            program.databuf += v.to_bytes(size, program.endian)
+            program.databuf += v.to_bytes(size, program.arch_os_traits.get_endian_str())
         case _:
             raise RuntimeError('invalid variable value')
 
@@ -718,8 +842,6 @@ def compile(source, system = None, processor = None):
                 compile_body(b.body, program)
             # No need for further checks for valid values, it is done in the first loop
 
-    program.relocations.append(Relocation('main', b'.text', 0, RelType.none))
-
     return program
 
 
@@ -772,7 +894,9 @@ def elfgen(fname, program):
         phdr.contents[s.idx].align = program.ps
         lastvaddr = phdr.contents[s.idx].vaddr + phdr.contents[s.idx].memsz
 
-    e.applyrelocations(program.relocations, program.symbols)
+    e.update_symbols(program.symbols)
+
+    e.apply_relocations(program.relocations, program.symbols)
 
     ehdr = e.getehdr()
     ehdr.contents.shstrndx = e.ndxscn(shstrscn)
