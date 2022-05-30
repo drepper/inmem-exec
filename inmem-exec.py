@@ -948,6 +948,5 @@ status:int = 0
     compile(source, system = system, processor = processor).elfgen(fname).execute(args)
 
 
-if __name__ == '__main__':
-    main(b'test', sys.argv[1:])
-    exit(42)
+main(b'test', sys.argv[1:])
+exit(42)
