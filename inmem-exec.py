@@ -174,10 +174,7 @@ class rv32_encoding:
         word1 = (reg << 7) | 0b0110111
         res1 = word1.to_bytes(4, 'little')
         logwidth = math.frexp(width)[1] - 1
-        if signed or width == 4:
-            word2 = (reg << 15) | (logwidth << 12) | (reg << 7) | 0b0000011
-        else:
-            word2 = (reg << 15) | ((logwidth | 0b100) << 12) | (reg << 7) | 0b0000011
+        word2 = (reg << 15) | ((logwidth | (0 if signed or width == 4 else 0b100)) << 12) | (reg << 7) | 0b0000011
         res2 = word2.to_bytes(4, 'little')
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
@@ -656,7 +653,6 @@ class Config(object):
     def execute(self, args):
         if os.execve in os.supports_fd:
             os.execve(self.e.fd, [ self.fname ] + args, dict())
-            return 99
         raise RuntimeError(f'platform {platform.system()} does not support execve on file descriptor')
 
     @staticmethod
