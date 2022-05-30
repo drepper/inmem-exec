@@ -310,7 +310,7 @@ class linux_rv32_traits(rv32_encoding):
     @classmethod
     def gen_syscall(cls, nr):
         res = cls.gen_loadimm(cls.rA7, nr)
-        res += (0x00000073).to_bytes(4, 'little')     # scall
+        res += b'\x73\x00\x00\x00'       # ecall
         return res
 
 
@@ -337,7 +337,7 @@ class linux_rv64_traits(rv64_encoding):
     @classmethod
     def gen_syscall(cls, nr):
         res = cls.gen_loadimm(cls.rA7, nr)
-        res += (0x00000073).to_bytes(4, 'little')     # scall
+        res += b'\x73\x00\x00\x00'       # ecall
         return res
 
 
