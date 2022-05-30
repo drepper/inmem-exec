@@ -447,8 +447,6 @@ class elf32_traits(object):
 
     def __init__(self, e, machine, libelf):
         self.libelf = libelf
-        self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-        self.libelf.elf_begin.restype = (ctypes.c_void_p)
         self.libelf.elf32_newehdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf32_newehdr.restype = (ctypes.POINTER(elf32_ehdr))
         self.libelf.elf32_getehdr.argtypes = [ctypes.c_void_p]
@@ -477,8 +475,6 @@ class elf64_traits(object):
 
     def __init__(self, e, machine, libelf):
         self.libelf = libelf
-        self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-        self.libelf.elf_begin.restype = (ctypes.c_void_p)
         self.libelf.elf64_newehdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf64_newehdr.restype = (ctypes.POINTER(elf64_ehdr))
         self.libelf.elf64_getehdr.argtypes = [ctypes.c_void_p]
@@ -505,6 +501,8 @@ class elf(elfdef):
         self.libelf = ctypes.cdll.LoadLibrary('/$LIB/libelf.so.1')
         if self.libelf.elf_version(self.EV_CURRENT) != self.EV_CURRENT:
             raise RuntimeError("invalid libelf version")
+        self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        self.libelf.elf_begin.restype = (ctypes.c_void_p)
         self.libelf.elf_newscn.argtypes = [ctypes.c_void_p]
         self.libelf.elf_newscn.restype = (ctypes.c_void_p)
         self.libelf.elf_newdata.argtypes = [ctypes.c_void_p]
