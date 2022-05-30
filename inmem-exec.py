@@ -634,8 +634,6 @@ class elf(elfdef):
                     buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfff) << 20)).to_bytes(4, 'little') + buf[off+4:]
                     refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
-                case RelType.none:
-                    pass
                 case _:
                     raise ValueError('invalid relocation type')
 
