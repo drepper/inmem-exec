@@ -3,6 +3,7 @@ import ctypes
 import enum
 import os
 import platform
+import fnmatch
 import resource
 import sys
 import locale
@@ -372,14 +373,6 @@ class linux_rv64_traits(rv64_encoding):
         return res
 
 
-known_arch_os = {
-    ('Linux', 'x86_64'): linux_x86_64_traits,
-    ('Linux', 'i686'): linux_i386_traits,
-    ('Linux', 'rv32g'): linux_rv32_traits,
-    ('Linux', 'rv64g'): linux_rv64_traits,
-}
-
-
 class elfstrtab(object):
     def __init__(self):
         self.s = b'\x00'
@@ -695,6 +688,16 @@ class elf(elfdef):
         return offset, addr, lastfileoffset - offset, lastmemaddr - addr
 
 
+known_arch_os = {
+    'Linux': {
+        'x86_64': linux_x86_64_traits,
+        'i[3456]86': linux_i386_traits,
+        'rv32*': linux_rv32_traits,
+        'rv64*': linux_rv64_traits,
+    }
+}
+
+
 class Config(object):
     def __init__(self, system, processor):
         self.ps = resource.getpagesize()
@@ -730,7 +733,16 @@ class Config(object):
 
     @staticmethod
     def determine_config(system, processor):
-        return known_arch_os[system if system else platform.system(), processor if processor else platform.processor()]
+        system = system or platform.system()
+        processor = processor or platform.processor()
+        try:
+            archs = known_arch_os[system]
+            for a in archs:
+                if fnmatch.fnmatch(processor, a):
+                    return archs[a]
+        except KeyError:
+            pass
+        raise RuntimeError(f'unsupported OS/architecture {system}/{processor}')
 
     def known_syscall(self, name):
         return hasattr(self.arch_os_traits, 'SYS_' + name)
