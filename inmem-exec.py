@@ -763,6 +763,74 @@ class Program(Config):
     def get_endian_str(self):
         return 'little' if self.arch_os_traits.get_endian() == elfdef.ELFDATA2LSB else 'big'
 
+    def elfgen(self, fname):
+        e = self.create_elf(fname)
+
+        @enum.unique
+        class phdrs(enum.IntEnum):
+            code = 0
+            data = 1
+
+        @dataclass
+        class Segment:
+            idx: phdrs
+            sections: list
+            flags: int
+
+        # At a minimum there is a .text section and an executable segment.
+        segments = [
+            Segment(phdrs.code, [ 'Ehdr', b'.text' ], elfdef.PF_R | elfdef.PF_X)
+        ]
+        need_rodata = len(self.rodatabuf) > 0
+        if need_rodata:
+            segments[phdrs.code].sections.append(b'.rodata')
+        need_data = len(self.databuf) > 0
+        if need_data:
+            segments.append(Segment(phdrs.data, [ b'.data' ], elfdef.PF_R | elfdef.PF_W))
+
+        phdr = e.newphdr(len(segments))
+
+        codescn, codeshdr, codedata = e.newscn(b'.text', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC | elfdef.SHF_EXECINSTR, self.codebuf)
+
+        if need_rodata:
+            rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC, self.rodatabuf)
+
+        if need_data:
+            datascn, datashdr, datadata = e.newscn(b'.data', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC | elfdef.SHF_WRITE, self.databuf)
+
+        shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', elfdef.SHT_STRTAB, 0, e.shstrtab, 1)
+
+        e.update(elfdef.ELF_C_NULL)
+
+        lastvaddr = self.loadaddr
+        for s in segments:
+            lastvaddr = (lastvaddr + self.ps - 1) & ~(self.ps - 1)
+            offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
+            assert((offset & (self.ps - 1)) == (addr & (self.ps - 1)))
+            phdr.contents[s.idx].type = elfdef.PT_LOAD
+            phdr.contents[s.idx].flags = s.flags
+            phdr.contents[s.idx].offset = offset
+            phdr.contents[s.idx].vaddr = addr
+            phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
+            phdr.contents[s.idx].filesz = filesz
+            phdr.contents[s.idx].memsz = memsz
+            phdr.contents[s.idx].align = self.ps
+            lastvaddr = phdr.contents[s.idx].vaddr + phdr.contents[s.idx].memsz
+
+        e.update_symbols(self.symbols)
+
+        e.apply_relocations(self.relocations, self.symbols)
+
+        ehdr = e.getehdr()
+        ehdr.contents.shstrndx = e.ndxscn(shstrscn)
+        ehdr.contents.entry = self.symbols['main'].addr if 'main' in self.symbols else codeshdr.contents.addr
+
+        e.update(elfdef.ELF_C_WRITE_MMAP)
+
+        e.end()
+
+        return self
+
 
 def get_type(value):
     match value:
@@ -857,73 +925,6 @@ def compile(source, system = None, processor = None):
     return program
 
 
-def elfgen(fname, program):
-    e = program.create_elf(fname)
-
-    @enum.unique
-    class phdrs(enum.IntEnum):
-        code = 0
-        data = 1
-
-    @dataclass
-    class Segment:
-        idx: phdrs
-        sections: list
-        flags: int
-
-    # At a minimum there is a .text section and an executable segment.
-    segments = [
-        Segment(phdrs.code, [ 'Ehdr', b'.text' ], elfdef.PF_R | elfdef.PF_X)
-    ]
-    need_rodata = len(program.rodatabuf) > 0
-    if need_rodata:
-        segments[phdrs.code].sections.append(b'.rodata')
-    need_data = len(program.databuf) > 0
-    if need_data:
-        segments.append(Segment(phdrs.data, [ b'.data' ], elfdef.PF_R | elfdef.PF_W))
-
-    phdr = e.newphdr(len(segments))
-
-    codescn, codeshdr, codedata = e.newscn(b'.text', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC | elfdef.SHF_EXECINSTR, program.codebuf)
-
-    if need_rodata:
-        rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC, program.rodatabuf)
-
-    if need_data:
-        datascn, datashdr, datadata = e.newscn(b'.data', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC | elfdef.SHF_WRITE, program.databuf)
-
-    shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', elfdef.SHT_STRTAB, 0, e.shstrtab, 1)
-
-    e.update(elfdef.ELF_C_NULL)
-
-    lastvaddr = program.loadaddr
-    for s in segments:
-        lastvaddr = (lastvaddr + program.ps - 1) & ~(program.ps - 1)
-        offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
-        assert((offset & (program.ps - 1)) == (addr & (program.ps - 1)))
-        phdr.contents[s.idx].type = elfdef.PT_LOAD
-        phdr.contents[s.idx].flags = s.flags
-        phdr.contents[s.idx].offset = offset
-        phdr.contents[s.idx].vaddr = addr
-        phdr.contents[s.idx].paddr = phdr.contents[s.idx].vaddr
-        phdr.contents[s.idx].filesz = filesz
-        phdr.contents[s.idx].memsz = memsz
-        phdr.contents[s.idx].align = program.ps
-        lastvaddr = phdr.contents[s.idx].vaddr + phdr.contents[s.idx].memsz
-
-    e.update_symbols(program.symbols)
-
-    e.apply_relocations(program.relocations, program.symbols)
-
-    ehdr = e.getehdr()
-    ehdr.contents.shstrndx = e.ndxscn(shstrscn)
-    ehdr.contents.entry = program.symbols['main'].addr if 'main' in program.symbols else codeshdr.contents.addr
-
-    e.update(elfdef.ELF_C_WRITE_MMAP)
-
-    e.end()
-
-
 def main(fname, args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
     source = r'''
@@ -943,9 +944,8 @@ status:int = 0
         system = processor
         processor = args[0]
         args = args[1:]
-    program = compile(source, system = system, processor = processor)
-    elfgen(fname, program)
-    program.execute(args)
+
+    compile(source, system = system, processor = processor).elfgen(fname).execute(args)
 
 
 if __name__ == '__main__':
