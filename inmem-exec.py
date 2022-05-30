@@ -238,11 +238,6 @@ class linux_x86_64_traits(x86_64_encoding):
     SYS_exit = 231       # actually SYS_exit_group
 
     @staticmethod
-    def get_loadaddr():
-        # XYZ add randomization
-        return 0x40000
-
-    @staticmethod
     def get_endian():
         return elfdef.ELFDATA2LSB
     @staticmethod
@@ -271,11 +266,6 @@ class linux_x86_64_traits(x86_64_encoding):
 class linux_i386_traits(i386_encoding):
     SYS_write = 4
     SYS_exit = 252       # actually SYS_exit_group
-
-    @staticmethod
-    def get_loadaddr():
-        # XYZ add randomization
-        return 0x40000
 
     @staticmethod
     def get_endian():
@@ -308,11 +298,6 @@ class linux_rv32_traits(rv32_encoding):
     SYS_exit = 94       # actually SYS_exit_group
 
     @staticmethod
-    def get_loadaddr():
-        # XYZ add randomization
-        return 0x40000
-
-    @staticmethod
     def get_endian():
         return elfdef.ELFDATA2LSB
     @staticmethod
@@ -341,11 +326,6 @@ class linux_rv32_traits(rv32_encoding):
 class linux_rv64_traits(rv64_encoding):
     SYS_write = 64
     SYS_exit = 94       # actually SYS_exit_group
-
-    @staticmethod
-    def get_loadaddr():
-        # XYZ add randomization
-        return 0x40000
 
     @staticmethod
     def get_endian():
@@ -703,7 +683,7 @@ class Config(object):
         self.ps = resource.getpagesize()
         self.encoding = locale.getpreferredencoding()
         self.arch_os_traits = Config.determine_config(system, processor)
-        self.loadaddr = self.arch_os_traits.get_loadaddr()
+        self.loadaddr = self.arch_os_traits.get_loadaddr() if hasattr(self.arch_os_traits, 'get_loadaddr') else 0x40000
 
     def create_elf(self, fname):
         self.fname = fname
