@@ -486,7 +486,7 @@ class elf32_traits(object):
         self.libelf.elf32_newphdr.restype = (ctypes.POINTER(elf32_phdr))
         self.libelf.elf32_getshdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf32_getshdr.restype = (ctypes.POINTER(elf32_shdr))
-        self.elfclass = e.ELFCLASS32
+        self.elfclass = elfdef.ELFCLASS32
         self.machine = machine
         self.phdr_type = elf32_phdr
     def newehdr(self, e):
@@ -514,7 +514,7 @@ class elf64_traits(object):
         self.libelf.elf64_newphdr.restype = (ctypes.POINTER(elf64_phdr))
         self.libelf.elf64_getshdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf64_getshdr.restype = (ctypes.POINTER(elf64_shdr))
-        self.elfclass = e.ELFCLASS64
+        self.elfclass = elfdef.ELFCLASS64
         self.machine = machine
         self.phdr_type = elf64_phdr
     def newehdr(self, e):
@@ -527,10 +527,10 @@ class elf64_traits(object):
         return self.libelf.elf64_getshdr(scn)
 
 
-class elf(elfdef):
+class elf(object):
     def __init__(self, machine, bits):
         self.libelf = ctypes.cdll.LoadLibrary('/$LIB/libelf.so.1')
-        if self.libelf.elf_version(self.EV_CURRENT) != self.EV_CURRENT:
+        if self.libelf.elf_version(elfdef.EV_CURRENT) != elfdef.EV_CURRENT:
             raise RuntimeError("invalid libelf version")
         self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
         self.libelf.elf_begin.restype = (ctypes.c_void_p)
@@ -556,7 +556,7 @@ class elf(elfdef):
         self.dataalign = 16
     def open(self, fd):
         self.fd = fd
-        self.e = self.libelf.elf_begin(fd, self.C_WRITE, None)
+        self.e = self.libelf.elf_begin(fd, elfdef.C_WRITE, None)
         return self.e != 0
     def newehdr(self):
         return self.traits.newehdr(self.e)
@@ -575,10 +575,10 @@ class elf(elfdef):
         data = self.newdata(scn)
         data.contents.size = len(buf)
         data.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf.data(), data.contents.size), ctypes.POINTER(ctypes.c_byte))
-        data.contents.type = self.ELF_T_BYTE
-        data.contents.version = self.EV_CURRENT
+        data.contents.type = elfdef.ELF_T_BYTE
+        data.contents.version = elfdef.EV_CURRENT
         data.contents.off = 0
-        data.contents.align = align if align else self.codealign if (flags & self.SHF_EXECINSTR) != 0 else self.dataalign
+        data.contents.align = align if align else self.codealign if (flags & elfdef.SHF_EXECINSTR) != 0 else self.dataalign
         self.sectionidx[name] = self.libelf.elf_ndxscn(scn)
         return scn, shdr, data
     def getscn(self, ndx):
@@ -644,7 +644,7 @@ class elf(elfdef):
                 shdr = self.getshdr(self.getscn(self.sectionidx[name]))
                 shdr.contents.addr = loadaddr + shdr.contents.offset
                 offset = shdr.contents.offset if offset == -1 else min(offset, shdr.contents.offset)
-                if shdr.contents.type == self.SHT_PROGBITS:
+                if shdr.contents.type == elfdef.SHT_PROGBITS:
                     lastfileoffset = max(lastfileoffset, shdr.contents.offset + shdr.contents.size)
                 addr = shdr.contents.addr if addr == -1 else min(addr, shdr.contents.addr)
                 lastmemaddr = max(lastmemaddr, shdr.contents.addr + shdr.contents.size)
@@ -686,10 +686,10 @@ class Config(object):
             raise RuntimeError("cannot open elf")
 
         ehdr = self.e.newehdr()
-        ehdr.contents.ident[self.e.EI_CLASS] = self.e.traits.elfclass
-        ehdr.contents.ident[self.e.EI_DATA] = self.arch_os_traits.get_endian()
-        ehdr.contents.ident[self.e.EI_OSABI] = self.e.ELFOSABI_NONE
-        ehdr.contents.type = self.e.ET_EXEC
+        ehdr.contents.ident[elfdef.EI_CLASS] = self.e.traits.elfclass
+        ehdr.contents.ident[elfdef.EI_DATA] = self.arch_os_traits.get_endian()
+        ehdr.contents.ident[elfdef.EI_OSABI] = elfdef.ELFOSABI_NONE
+        ehdr.contents.type = elfdef.ET_EXEC
         ehdr.contents.machine = self.e.traits.machine
 
         return self.e
@@ -873,35 +873,35 @@ def elfgen(fname, program):
 
     # At a minimum there is a .text section and an executable segment.
     segments = [
-        Segment(phdrs.code, [ 'Ehdr', b'.text' ], e.PF_R | e.PF_X)
+        Segment(phdrs.code, [ 'Ehdr', b'.text' ], elfdef.PF_R | elfdef.PF_X)
     ]
     need_rodata = len(program.rodatabuf) > 0
     if need_rodata:
         segments[phdrs.code].sections.append(b'.rodata')
     need_data = len(program.databuf) > 0
     if need_data:
-        segments.append(Segment(phdrs.data, [ b'.data' ], e.PF_R | e.PF_W))
+        segments.append(Segment(phdrs.data, [ b'.data' ], elfdef.PF_R | elfdef.PF_W))
 
     phdr = e.newphdr(len(segments))
 
-    codescn, codeshdr, codedata = e.newscn(b'.text', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_EXECINSTR, program.codebuf)
+    codescn, codeshdr, codedata = e.newscn(b'.text', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC | elfdef.SHF_EXECINSTR, program.codebuf)
 
     if need_rodata:
-        rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', e.SHT_PROGBITS, e.SHF_ALLOC, program.rodatabuf)
+        rodatascn, rodatashdr, rodatadata = e.newscn(b'.rodata', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC, program.rodatabuf)
 
     if need_data:
-        datascn, datashdr, datadata = e.newscn(b'.data', e.SHT_PROGBITS, e.SHF_ALLOC | e.SHF_WRITE, program.databuf)
+        datascn, datashdr, datadata = e.newscn(b'.data', elfdef.SHT_PROGBITS, elfdef.SHF_ALLOC | elfdef.SHF_WRITE, program.databuf)
 
-    shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', e.SHT_STRTAB, 0, e.shstrtab, 1)
+    shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', elfdef.SHT_STRTAB, 0, e.shstrtab, 1)
 
-    e.update(e.ELF_C_NULL)
+    e.update(elfdef.ELF_C_NULL)
 
     lastvaddr = program.loadaddr
     for s in segments:
         lastvaddr = (lastvaddr + program.ps - 1) & ~(program.ps - 1)
         offset, addr, filesz, memsz = e.firstlastaddr(s.sections, lastvaddr)
         assert((offset & (program.ps - 1)) == (addr & (program.ps - 1)))
-        phdr.contents[s.idx].type = e.PT_LOAD
+        phdr.contents[s.idx].type = elfdef.PT_LOAD
         phdr.contents[s.idx].flags = s.flags
         phdr.contents[s.idx].offset = offset
         phdr.contents[s.idx].vaddr = addr
@@ -919,7 +919,7 @@ def elfgen(fname, program):
     ehdr.contents.shstrndx = e.ndxscn(shstrscn)
     ehdr.contents.entry = program.symbols['main'].addr if 'main' in program.symbols else codeshdr.contents.addr
 
-    e.update(e.ELF_C_WRITE_MMAP)
+    e.update(elfdef.ELF_C_WRITE_MMAP)
 
     e.end()
 
