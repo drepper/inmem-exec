@@ -8,7 +8,6 @@ import sys
 import locale
 import ast
 from dataclasses import dataclass
-import collections
 
 libc = ctypes.CDLL(None)
 
@@ -853,7 +852,12 @@ def elfgen(fname, program):
         code = 0
         data = 1
 
-    Segment = collections.namedtuple('Segment', 'idx sections flags')
+    @dataclass
+    class Segment:
+        idx: phdrs
+        sections: list
+        flags: int
+
     # At a minimum there is a .text section and an executable segment.
     segments = [
         Segment(phdrs.code, [ 'Ehdr', b'.text' ], e.PF_R | e.PF_X)
