@@ -9,8 +9,6 @@ import locale
 import ast
 from dataclasses import dataclass
 
-libc = ctypes.CDLL(None)
-
 
 @enum.unique
 class RelType(enum.Enum):
@@ -656,18 +654,10 @@ class Config(object):
         return self.e
 
     def execute(self, args):
-        argv = (ctypes.c_char_p * (2 + len(args)))(self.fname, *args, ctypes.c_char_p())
-        env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
-
-        if platform.system() == 'Linux':
-            AT_EMPTY_PATH = 0x1000
-            snr = {
-                'x86_64': 322,
-                'i686': 358,
-            }
-            libc.syscall(snr[platform.processor()], self.e.fd, b'', argv, env, AT_EMPTY_PATH)
-        else:
-            raise RuntimeError(f'unsupported platform {platform.system()}')
+        if os.execve in os.supports_fd:
+            os.execve(self.e.fd, [ self.fname ] + args, dict())
+            return 99
+        raise RuntimeError(f'platform {platform.system()} does not support execve on file descriptor')
 
     @staticmethod
     def determine_config(system, processor):
@@ -882,7 +872,7 @@ def elfgen(fname, program):
     e.end()
 
 
-def main(fname, *args):
+def main(fname, args):
     """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
     source = r'''
 def main():
@@ -907,5 +897,5 @@ status:int = 0
 
 
 if __name__ == '__main__':
-    main(b'test', *sys.argv[1:])
+    main(b'test', sys.argv[1:])
     exit(42)
