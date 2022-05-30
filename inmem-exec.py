@@ -445,27 +445,6 @@ class elf64_shdr(ctypes.Structure):
     ]
 
 
-class elf_x86_64_traits(x86_64_encoding):
-    codealign = 16
-    dataalign = 16
-
-
-class elf_i386_traits(i386_encoding):
-    codealign = 16
-    dataalign = 16
-
-
-class elf_rv32_traits(rv32_encoding):
-    codealign = 16
-    dataalign = 16
-
-
-machtraits_32 = {
-    elfdef.EM_386: elf_i386_traits,
-    elfdef.EM_RISCV: elf_rv32_traits,
-}
-
-
 class elf32_traits(object):
     Word = ctypes.c_int32
     Xword = ctypes.c_int32
@@ -485,7 +464,6 @@ class elf32_traits(object):
         self.libelf.elf32_getshdr.restype = (ctypes.POINTER(elf32_shdr))
         self.elfclass = e.ELFCLASS32
         self.machine = machine
-        self.machtraits = machtraits_32[self.machine]()
         self.phdr_type = elf32_phdr
     def newehdr(self, e):
         return self.libelf.elf32_newehdr(e)
@@ -495,11 +473,6 @@ class elf32_traits(object):
         return ctypes.cast(self.libelf.elf32_newphdr(e, cnt), ctypes.POINTER(elf32_phdr * cnt))
     def getshdr(self, scn):
         return self.libelf.elf32_getshdr(scn)
-
-
-machtraits_64 = {
-    elfdef.EM_X86_64: elf_x86_64_traits,
-}
 
 
 class elf64_traits(object):
@@ -521,7 +494,6 @@ class elf64_traits(object):
         self.libelf.elf64_getshdr.restype = (ctypes.POINTER(elf64_shdr))
         self.elfclass = e.ELFCLASS64
         self.machine = machine
-        self.machtraits = machtraits_64[self.machine]()
         self.phdr_type = elf64_phdr
     def newehdr(self, e):
         return self.libelf.elf64_newehdr(e)
@@ -555,8 +527,9 @@ class elf(elfdef):
         self.traits = elf64_traits(self, machine, self.libelf) if bits == 64 else elf32_traits(self, machine, self.libelf)
         self.shstrtab = elfstrtab()
         self.sectionidx = dict()
-        self.codealign = self.traits.machtraits.codealign
-        self.dataalign = self.traits.machtraits.dataalign
+        # It should not be necessary to customize the alignment values.
+        self.codealign = 16
+        self.dataalign = 16
     def open(self, fd):
         self.fd = fd
         self.e = self.libelf.elf_begin(fd, self.C_WRITE, None)
