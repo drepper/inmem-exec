@@ -231,17 +231,8 @@ class rv64_encoding:
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
 
-# OS traits
-class linux_traits(object):
-    @staticmethod
-    def create_executable(fname):
-        fd = os.memfd_create(fname, os.MFD_CLOEXEC)
-        # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
-        return fd
-
-
 # OS+CPU traits
-class linux_x86_64_traits(linux_traits, x86_64_encoding):
+class linux_x86_64_traits(x86_64_encoding):
     SYS_write = 1
     SYS_exit = 231       # actually SYS_exit_group
 
@@ -276,7 +267,7 @@ class linux_x86_64_traits(linux_traits, x86_64_encoding):
         return res
 
 
-class linux_i386_traits(linux_traits, i386_encoding):
+class linux_i386_traits(i386_encoding):
     SYS_write = 4
     SYS_exit = 252       # actually SYS_exit_group
 
@@ -311,7 +302,7 @@ class linux_i386_traits(linux_traits, i386_encoding):
         return res
 
 
-class linux_rv32_traits(linux_traits, rv32_encoding):
+class linux_rv32_traits(rv32_encoding):
     SYS_write = 64
     SYS_exit = 94       # actually SYS_exit_group
 
@@ -346,7 +337,7 @@ class linux_rv32_traits(linux_traits, rv32_encoding):
         return res
 
 
-class linux_rv64_traits(linux_traits, rv64_encoding):
+class linux_rv64_traits(rv64_encoding):
     SYS_write = 64
     SYS_exit = 94       # actually SYS_exit_group
 
@@ -713,7 +704,12 @@ class Config(object):
 
     def create_elf(self, fname):
         self.fname = fname
-        fd = self.arch_os_traits.create_executable(self.fname)
+
+        if hasattr(os, 'memfd_create'):
+            fd = os.memfd_create(fname, os.MFD_CLOEXEC)
+        else:
+            fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
+
         self.e = elf(self.arch_os_traits.elf_machine, self.arch_os_traits.nbits)
         if not self.e.open(fd):
             raise RuntimeError("cannot open elf")
