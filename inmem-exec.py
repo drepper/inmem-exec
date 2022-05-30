@@ -240,9 +240,6 @@ class linux_x86_64_traits(x86_64_encoding):
     @staticmethod
     def get_endian():
         return elfdef.ELFDATA2LSB
-    @staticmethod
-    def get_endian_str():
-        return 'little'
 
     syscall_arg_regs = [
         x86_64_encoding.rDI,
@@ -270,9 +267,6 @@ class linux_i386_traits(i386_encoding):
     @staticmethod
     def get_endian():
         return elfdef.ELFDATA2LSB
-    @staticmethod
-    def get_endian_str():
-        return 'little'
 
     syscall_arg_regs = [
         i386_encoding.rBX,
@@ -300,9 +294,6 @@ class linux_rv32_traits(rv32_encoding):
     @staticmethod
     def get_endian():
         return elfdef.ELFDATA2LSB
-    @staticmethod
-    def get_endian_str():
-        return 'little'
 
     syscall_arg_regs = [
         rv32_encoding.rA0,
@@ -330,9 +321,6 @@ class linux_rv64_traits(rv64_encoding):
     @staticmethod
     def get_endian():
         return elfdef.ELFDATA2LSB
-    @staticmethod
-    def get_endian_str():
-        return 'little'
 
     syscall_arg_regs = [
         rv32_encoding.rA0,
@@ -772,6 +760,9 @@ class Program(Config):
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
 
+    def get_endian_str(self):
+        return 'little' if self.arch_os_traits.get_endian() == elfdef.ELFDATA2LSB else 'big'
+
 
 def get_type(value):
     match value:
@@ -799,7 +790,7 @@ def define_variable(program, var, ann, value):
     program.symbols[var] = Symbol(var, size, b'.data', addr)
     match value:
         case ast.Constant(v) if type(v) == int:
-            program.databuf += v.to_bytes(size, program.arch_os_traits.get_endian_str())
+            program.databuf += v.to_bytes(size, program.get_endian_str())
         case _:
             raise RuntimeError('invalid variable value')
 
