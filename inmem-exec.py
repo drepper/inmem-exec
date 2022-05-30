@@ -34,7 +34,41 @@ class Relocation:
     reltype: RelType
 
 
+class elfdef(object):
+    EV_CURRENT = 1
+    ET_EXEC = 2
+    C_WRITE = 3
+    EI_CLASS = 4
+    ELFCLASS32 = 1
+    ELFCLASS64 = 2
+    EI_DATA = 5
+    ELFDATA2LSB = 1
+    ELFDATA2MSB = 2
+    EI_VERSION = 6
+    EI_OSABI = 7
+    ELFOSABI_NONE = 0
+    EI_ABIVERSION = 8
+    EM_386 = 3
+    EM_ARM = 40
+    EM_X86_64 = 62
+    SHT_PROGBITS = 1
+    SHT_STRTAB = 3
+    SHF_WRITE = 1
+    SHF_ALLOC = 2
+    SHF_EXECINSTR = 4
+    ELF_T_BYTE = 0
+    ELF_C_NULL = 0
+    ELF_C_WRITE_MMAP = 10
+    PT_LOAD = 1
+    PF_R = 4
+    PF_W = 2
+    PF_X = 1
+
+
 class x86_64_encoding:
+    nbits = 64           # processor bits
+    elf_machine = elfdef.EM_X86_64
+
     rAX = 0b0000
     rCX = 0b0001
     rDX = 0b0010
@@ -68,7 +102,7 @@ class x86_64_encoding:
         rex = 0x44 if reg >= 8 else 0
         if width > 4:
             rex |= 0x48
-        res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + (0).to_bytes(width, 'little')
+        res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
         return res, (4 if rex else 3), RelType.abs4
 
     @staticmethod
@@ -78,36 +112,55 @@ class x86_64_encoding:
         res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
         return res, (2 if rex else 1), RelType.abs4
 
+
+class i386_encoding:
+    nbits = 32           # processor bits
+    elf_machine = elfdef.EM_386
+
+    rAX = 0b000
+    rCX = 0b001
+    rDX = 0b010
+    rBX = 0b011
+    rSP = 0b100
+    rBP = 0b101
+    rSI = 0b110
+    rDI = 0b111
+
+    @staticmethod
+    def gen_loadimm(reg, val, width = 0, signed = False):
+        res = (0xb8 + reg).to_bytes(1, 'little') + val.to_bytes(4, 'little')
+        return res
+
+    @staticmethod
+    def gen_loadmem(reg, width):
+        res = b'\x8b' + (0x05 + (reg << 3)).to_bytes(1, 'little') + b'\x00\x00\x00\x00'
+        return res, 2, RelType.abs4
+
+    @staticmethod
+    def gen_loadref(reg, offset):
+        # We always assume a small memory model, references are 4 bytes
+        res = (0xb8 + reg).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
+        return res, 1, RelType.abs4
+
+
 # OS traits
 class linux_traits(object):
-    AT_EMPTY_PATH = 0x1000
-
     @staticmethod
     def create_executable(fname):
         fd = os.memfd_create(fname, os.MFD_CLOEXEC)
         # fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
         return fd
 
-    @staticmethod
-    def execute(snr, fd, argv, env):
-        libc.syscall(snr, fd, b'', argv, env, linux_x86_64_traits.AT_EMPTY_PATH)
-
 
 # OS+CPU traits
 class linux_x86_64_traits(linux_traits, x86_64_encoding):
-    nbits = 64           # processor bits
     SYS_write = 1
     SYS_exit = 231       # actually SYS_exit_group
-    SYS_execveat = 322
 
     @staticmethod
     def get_loadaddr():
         # XYZ add randomization
         return 0x40000
-
-    @staticmethod
-    def execute(fd, argv, env):
-        linux_traits.execute(linux_x86_64_traits.SYS_execveat, fd, argv, env)
 
     syscall_arg_regs = [
         x86_64_encoding.rDI,
@@ -128,8 +181,37 @@ class linux_x86_64_traits(linux_traits, x86_64_encoding):
         return res
 
 
+class linux_i386_traits(linux_traits, i386_encoding):
+    SYS_write = 4
+    SYS_exit = 252       # actually SYS_exit_group
+
+    @staticmethod
+    def get_loadaddr():
+        # XYZ add randomization
+        return 0x40000
+
+    syscall_arg_regs = [
+        i386_encoding.rBX,
+        i386_encoding.rCX,
+        i386_encoding.rDX,
+        i386_encoding.rSI,
+        i386_encoding.rDI,
+        i386_encoding.rBP
+    ]
+    @staticmethod
+    def get_syscall_arg_reg(nr):
+        return linux_i386_traits.syscall_arg_regs[nr]
+
+    @staticmethod
+    def gen_syscall(nr):
+        res = i386_encoding.gen_loadimm(i386_encoding.rAX, nr)
+        res += b'\xcd\x80'                          # int $0x80
+        return res
+
+
 known_arch_os = {
-    ('Linux', 'x86_64'): linux_x86_64_traits
+    ('Linux', 'x86_64'): linux_x86_64_traits,
+    ('Linux', 'i686'): linux_i386_traits,
 }
 
 
@@ -188,6 +270,19 @@ class elf32_ehdr(ctypes.Structure):
     ]
 
 
+class elf32_phdr(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_uint32),
+        ('offset', ctypes.c_uint32),
+        ('vaddr', ctypes.c_uint32),
+        ('paddr', ctypes.c_uint32),
+        ('filesz', ctypes.c_uint32),
+        ('memsz', ctypes.c_uint32),
+        ('flags', ctypes.c_uint32),
+        ('align', ctypes.c_uint32)
+    ]
+
+
 class elf32_shdr(ctypes.Structure):
     _fields_ = [
         ('name', ctypes.c_uint32),
@@ -201,22 +296,6 @@ class elf32_shdr(ctypes.Structure):
         ('addralign', ctypes.c_uint32),
         ('entsize', ctypes.c_uint32)
     ]
-
-
-class elf32_traits(object):
-    Word = ctypes.c_int32
-    Xword = ctypes.c_int32
-    Addr = ctypes.c_int32
-
-    def __init__(self):
-        self.e = e
-        self.libelf = libelf
-    def newehdr(self):
-        return elf32_ehdr.from_address(self.libelf.elf32_newehdr(self.e))
-    def newphdr(self, cnt):
-        return self.libelf.elf32_newphdr(self.e, cnt)
-    def getshdr(self, scn):
-        return elf32_shdr.from_address(self.libelf.elf32_getshdr(scn))
 
 
 class elf64_ehdr(ctypes.Structure):
@@ -236,6 +315,7 @@ class elf64_ehdr(ctypes.Structure):
         ('shnum', ctypes.c_uint16),
         ('shstrndx', ctypes.c_uint16)
     ]
+
 
 class elf64_phdr(ctypes.Structure):
     _fields_ = [
@@ -268,75 +348,60 @@ class elf64_shdr(ctypes.Structure):
 class elf_x86_64_traits(x86_64_encoding):
     codealign = 16
     dataalign = 16
-    def __init__(self):
-        pass
-    def applyrelocations(self, e, reltab, symbols):
-        for r in reltab:
-            sym = symbols[r.symref]
 
-            defscnidx = e.sectionidx[sym.section]
-            defscn = e.getscn(defscnidx)
-            defshdr = e.getshdr(defscn)
-            sym.addr += defshdr.contents.addr
-            defval = sym.addr
 
-            refscnidx = e.sectionidx[r.section]
-            refscn = e.getscn(refscnidx)
-            refdata = e.getdata(refscn, None)
-            off = r.offset
-            while off >= refdata.contents.size:
-                off -= refdata.contents.size
-                refdata = e.getdata(refscn, refdata)
-            match r.reltype:
-                case RelType.abs4:
-                    assert off + 4 <= refdata.contents.size
-                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + defval).to_bytes(4, 'little') + buf[off+4:]
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
-                case RelType.none:
-                    pass
-                case _:
-                    raise ValueError('invalid relocation type')
+class elf_i386_traits(i386_encoding):
+    codealign = 16
+    dataalign = 16
 
-class elfdef(object):
-    EV_CURRENT = 1
-    ET_EXEC = 2
-    C_WRITE = 3
-    EI_CLASS = 4
-    ELFCLASS32 = 1
-    ELFCLASS64 = 2
-    EI_DATA = 5
-    ELFDATA2LSB = 1
-    ELFDATA2MSB = 2
-    EI_VERSION = 6
-    EI_OSABI = 7
-    ELFOSABI_NONE = 0
-    EI_ABIVERSION = 8
-    EM_ARM = 40
-    EM_X86_64 = 62
-    SHT_PROGBITS = 1
-    SHT_STRTAB = 3
-    SHF_WRITE = 1
-    SHF_ALLOC = 2
-    SHF_EXECINSTR = 4
-    ELF_T_BYTE = 0
-    ELF_C_NULL = 0
-    ELF_C_WRITE_MMAP = 10
-    PT_LOAD = 1
-    PF_R = 4
-    PF_W = 2
-    PF_X = 1
+
+machtraits_32 = {
+    elfdef.EM_386: elf_i386_traits,
+}
+
+
+class elf32_traits(object):
+    Word = ctypes.c_int32
+    Xword = ctypes.c_int32
+    Addr = ctypes.c_int32
+
+    def __init__(self, e, machine, libelf):
+        self.libelf = libelf
+        self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        self.libelf.elf_begin.restype = (ctypes.c_void_p)
+        self.libelf.elf32_newehdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf32_newehdr.restype = (ctypes.POINTER(elf32_ehdr))
+        self.libelf.elf32_getehdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf32_getehdr.restype = (ctypes.POINTER(elf32_ehdr))
+        self.libelf.elf32_newphdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf32_newphdr.restype = (ctypes.POINTER(elf32_phdr))
+        self.libelf.elf32_getshdr.argtypes = [ctypes.c_void_p]
+        self.libelf.elf32_getshdr.restype = (ctypes.POINTER(elf32_shdr))
+        self.elfclass = e.ELFCLASS32
+        self.machine = machine
+        self.machtraits = machtraits_32[self.machine]()
+        self.phdr_type = elf32_phdr
+    def newehdr(self, e):
+        return self.libelf.elf32_newehdr(e)
+    def getehdr(self, e):
+        return self.libelf.elf32_getehdr(e)
+    def newphdr(self, e, cnt):
+        return ctypes.cast(self.libelf.elf32_newphdr(e, cnt), ctypes.POINTER(elf32_phdr * cnt))
+    def getshdr(self, scn):
+        return self.libelf.elf32_getshdr(scn)
+
 
 machtraits_64 = {
-    elfdef.EM_X86_64: elf_x86_64_traits
+    elfdef.EM_X86_64: elf_x86_64_traits,
 }
+
 
 class elf64_traits(object):
     Word = ctypes.c_int32
     Xword = ctypes.c_int64
     Addr = ctypes.c_int64
 
-    def __init__(self, e, libelf):
+    def __init__(self, e, machine, libelf):
         self.libelf = libelf
         self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
         self.libelf.elf_begin.restype = (ctypes.c_void_p)
@@ -349,7 +414,7 @@ class elf64_traits(object):
         self.libelf.elf64_getshdr.argtypes = [ctypes.c_void_p]
         self.libelf.elf64_getshdr.restype = (ctypes.POINTER(elf64_shdr))
         self.elfclass = e.ELFCLASS64
-        self.machine = e.get_machine(64)
+        self.machine = machine
         self.machtraits = machtraits_64[self.machine]()
         self.phdr_type = elf64_phdr
     def newehdr(self, e):
@@ -360,11 +425,10 @@ class elf64_traits(object):
         return ctypes.cast(self.libelf.elf64_newphdr(e, cnt), ctypes.POINTER(elf64_phdr * cnt))
     def getshdr(self, scn):
         return self.libelf.elf64_getshdr(scn)
-    def applyrelocations(self, e, reltab, symbols):
-        return self.machtraits.applyrelocations(e, reltab, symbols)
+
 
 class elf(elfdef):
-    def __init__(self, bits):
+    def __init__(self, machine, bits):
         self.libelf = ctypes.cdll.LoadLibrary('/$LIB/libelf.so.1')
         if self.libelf.elf_version(self.EV_CURRENT) != self.EV_CURRENT:
             raise RuntimeError("invalid libelf version")
@@ -382,7 +446,7 @@ class elf(elfdef):
         self.libelf.elf_ndxscn.restype = (ctypes.c_size_t)
         self.libelf.elf_getscn.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
         self.libelf.elf_getscn.restype = (ctypes.c_void_p)
-        self.traits = elf64_traits(self, self.libelf) if bits == 64 else elf32_traits(self, self.libelf)
+        self.traits = elf64_traits(self, machine, self.libelf) if bits == 64 else elf32_traits(self, machine, self.libelf)
         self.shstrtab = elfstrtab()
         self.sectionidx = dict()
         self.codealign = self.traits.machtraits.codealign
@@ -427,7 +491,32 @@ class elf(elfdef):
     def end(self):
         return self.libelf.elf_end(self.e)
     def applyrelocations(self, reltab, symbols):
-        self.traits.applyrelocations(self, reltab, symbols)
+        for r in reltab:
+            sym = symbols[r.symref]
+
+            defscnidx = self.sectionidx[sym.section]
+            defscn = self.getscn(defscnidx)
+            defshdr = self.getshdr(defscn)
+            sym.addr += defshdr.contents.addr
+            defval = sym.addr
+
+            refscnidx = self.sectionidx[r.section]
+            refscn = self.getscn(refscnidx)
+            refdata = self.getdata(refscn, None)
+            off = r.offset
+            while off >= refdata.contents.size:
+                off -= refdata.contents.size
+                refdata = self.getdata(refscn, refdata)
+            match r.reltype:
+                case RelType.abs4:
+                    assert off + 4 <= refdata.contents.size
+                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + defval).to_bytes(4, 'little') + buf[off+4:]
+                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case RelType.none:
+                    pass
+                case _:
+                    raise ValueError('invalid relocation type')
     def firstlastaddr(self, names, loadaddr):
         offset = -1
         addr = -1
@@ -448,15 +537,6 @@ class elf(elfdef):
                 addr = loadaddr
                 lastmemaddr = max(lastmemaddr, ctypes.sizeof(self.traits.phdr_type))
         return offset, addr, lastfileoffset - offset, lastmemaddr - addr
-    @staticmethod
-    def get_machine(bits):
-        match platform.machine():
-            case 'x86_64':
-                return elf.EM_X86_64
-            case 'armv7l':
-                return elf.EM_ARM
-            case _:
-                raise RuntimeError("unknown platform")
 
 
 class Config(object):
@@ -470,7 +550,7 @@ class Config(object):
     def create_elf(self, fname):
         self.fname = fname
         fd = self.arch_os_traits.create_executable(self.fname)
-        self.e = elf(self.arch_os_traits.nbits)
+        self.e = elf(self.arch_os_traits.elf_machine, self.arch_os_traits.nbits)
         if not self.e.open(fd):
             raise RuntimeError("cannot open elf")
 
@@ -486,7 +566,16 @@ class Config(object):
     def execute(self, args):
         argv = (ctypes.c_char_p * (2 + len(args)))(self.fname, *args, ctypes.c_char_p())
         env = (ctypes.c_char_p * 1)(ctypes.c_char_p())
-        self.arch_os_traits.execute(self.e.fd, argv, env)
+
+        if platform.system() == 'Linux':
+            AT_EMPTY_PATH = 0x1000
+            snr = {
+                'x86_64': 322,
+                'i686': 358,
+            }
+            libc.syscall(snr[platform.processor()], self.e.fd, b'', argv, env, AT_EMPTY_PATH)
+        else:
+            raise RuntimeError(f'unsupported platform {platform.system()}')
 
     @staticmethod
     def determine_config(system, processor):
@@ -517,7 +606,7 @@ class Program(Config):
             case int(val):
                 self.codebuf += self.arch_os_traits.gen_loadimm(reg, val)
             case Symbol(_):
-                code, add, rel = self.arch_os_traits.gen_loadmem(reg, 4)
+                code, add, rel = self.arch_os_traits.gen_loadmem(reg, self.symbols[a.name].size)
                 add += len(self.codebuf)
                 self.codebuf += code
                 self.relocations.append(Relocation(a.name, b'.text', add, rel))
@@ -560,7 +649,7 @@ def define_variable(program, var, ann, value):
     addr = len(program.databuf)
     if addr % size != 0:
         npad = size * ((addr + size - 1) // size) - addr
-        program.databuf += (0).to_bytes(npad, program.endian)
+        program.databuf += b'\x00' * npad
         addr += npad
     program.symbols[var] = Symbol(var, size, b'.data', addr)
     match value:
@@ -703,11 +792,21 @@ def main():
     exit(status)
 status:int = 0
 '''
-    program = compile(source, processor = 'x86_64')
+
+    system = None
+    processor = None
+    if args:
+        processor = args[0]
+        args = args[1:]
+    if args:
+        system = processor
+        processor = args[0]
+        args = args[1:]
+    program = compile(source, system = system, processor = processor)
     elfgen(fname, program)
     program.execute(args)
 
 
 if __name__ == '__main__':
-    main(b'test')
+    main(b'test', *sys.argv[1:])
     exit(42)
