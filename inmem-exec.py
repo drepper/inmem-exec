@@ -17,6 +17,8 @@ class RelType(enum.Enum):
     abs4 = 1
     rvhi = 2
     rvlo = 3
+    armmovwabs = 4
+    armmovtabs = 5
 
 
 @dataclass
@@ -181,7 +183,6 @@ class rv32_encoding:
 
     @staticmethod
     def gen_loadref(reg, offset):
-        # We always assume a small memory model, references are 4 bytes
         word1 = (reg << 7) | 0b0110111
         res1 = word1.to_bytes(4, 'little')
         word2 = (reg << 15) | (reg << 7) | 0b0010011
@@ -230,6 +231,51 @@ class rv64_encoding:
         word2 = (reg << 15) | (reg << 7) | 0b0010011
         res2 = word2.to_bytes(4, 'little')
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+
+
+class arm_encoding:
+    nbits = 32           # processor bits
+    elf_machine = elfdef.EM_ARM
+    endian = 'little'
+
+    r0 = 0b0000
+    r1 = 0b0001
+    r2 = 0b0010
+    r3 = 0b0011
+    r4 = 0b0100
+    r5 = 0b0101
+    r6 = 0b0110
+    r7 = 0b0111
+
+    @classmethod
+    def gen_loadimm(cls, reg, val, width = 0, signed = False):
+        if val >= 0:
+            if val < 4096:
+                res = (0xe3a00000 | (reg << 12) | val).to_bytes(4, cls.endian)
+            else:
+                res = (0xe3000000 | ((val & 0xf000) << 4) | (reg << 12) | (val & 0xfff)).to_bytes(4, cls.endian)
+                if val >= 65536:
+                    res += (0xe3400000 | ((val >> 12) & 0xf0000) | ((val >> 16) & 0xfff)).to_bytes(4, cls.endian)
+        else:
+            if val >= -0x101:
+                res = (0xe3e00000 | ~val).to_bytes(4, cls.endian)
+            else:
+                res = (0xe3000000 | ((val & 0xf000) << 4) | (val & 0xfff)).to_bytes(4, cls.endian)
+                res += (0xe3400000 | ((val >> 12) & 0xf0000) | ((val >> 16) & 0xfff)).to_bytes(4, cls.endian)
+        return res
+
+    @classmethod
+    def gen_loadmem(cls, reg, width, signed = False):
+        res1 = (0xe3000000 | (reg << 12)).to_bytes(4, cls.endian)
+        res2 = (0xe3400000 | (reg << 12)).to_bytes(4, cls.endian)
+        res3 = (0xe5900000 | (reg << 16) | (reg << 12)).to_bytes(4, cls.endian)
+        return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs), (res3, 0, RelType.none) ]
+
+    @classmethod
+    def gen_loadref(cls, reg, offset):
+        res1 = (0xe3000000 | (reg << 12)).to_bytes(4, cls.endian)
+        res2 = (0xe3400000 | (reg << 12)).to_bytes(4, cls.endian)
+        return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs) ]
 
 
 # OS+CPU traits
@@ -341,6 +387,33 @@ class linux_rv64_traits(rv64_encoding):
         return res
 
 
+class linux_arm_traits(arm_encoding):
+    SYS_write = 4
+    SYS_exit = 248       # actually SYS_exit_group
+
+    @classmethod
+    def get_endian(cls):
+        return elfdef.ELFDATA2LSB if cls.endian == 'little' else elfdef.ELFDATA2MSB
+
+    syscall_arg_regs = [
+        arm_encoding.r0,
+        arm_encoding.r1,
+        arm_encoding.r2,
+        arm_encoding.r3,
+        arm_encoding.r4,
+        arm_encoding.r5
+    ]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
+
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.r7, nr)
+        res += (0xef000000).to_bytes(4, cls.endian)  # swi #0
+        return res
+
+
 class elfstrtab(object):
     def __init__(self):
         self.s = b'\x00'
@@ -353,6 +426,7 @@ class elfstrtab(object):
         self.s += n
         self.s += b'\000'
         return res
+
 
 class bytebuf(object):
     def __init__(self, b=b''):
@@ -631,6 +705,18 @@ class elf(object):
                     buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfff) << 20)).to_bytes(4, 'little') + buf[off+4:]
                     refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case RelType.armmovtabs:
+                    assert off + 4 <= refdata.contents.size
+                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
+                    immhi = ((defval >> 12) & 0xf0000) | ((defval >> 16) & 0xfff)
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + immhi).to_bytes(4, 'little') + buf[off+4:]
+                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case RelType.armmovwabs:
+                    assert off + 4 <= refdata.contents.size
+                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
+                    immlo = ((defval << 4) & 0xf0000) | (defval & 0xfff)
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + immlo).to_bytes(4, 'little') + buf[off+4:]
+                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case _:
                     raise ValueError('invalid relocation type')
 
@@ -662,6 +748,7 @@ known_arch_os = {
         'i[3456]86': linux_i386_traits,
         'rv32*': linux_rv32_traits,
         'rv64*': linux_rv64_traits,
+        'armv[78]*': linux_arm_traits,
     }
 }
 
@@ -696,7 +783,10 @@ class Config(object):
 
     def execute(self, args):
         if os.execve in os.supports_fd:
-            os.execve(self.e.fd, [ self.fname ] + args, dict())
+            try:
+                os.execve(self.e.fd, [ self.fname ] + args, dict())
+            except OSError:
+                exit(99)
         raise RuntimeError(f'platform {platform.system()} does not support execve on file descriptor')
 
     @staticmethod
@@ -901,7 +991,7 @@ def compile(source, system = None, processor = None):
     program = Program(system, processor)
     tree = ast.parse(source)
 
-    print(ast.dump(tree, indent=2))
+    # print(ast.dump(tree, indent=2))
 
     for b in tree.body:
         match b:
