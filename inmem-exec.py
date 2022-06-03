@@ -325,8 +325,17 @@ class aarch64_encoding:
         return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs) ]
 
 
+# OS traits
+class linux_traits:
+    libelfdso = '/$LIB/libelf.so.1'
+
+
+class freebsd_traits:
+    libelfdso = '/lib/libelf.so.2'
+
+
 # OS+CPU traits
-class linux_x86_64_traits(x86_64_encoding):
+class linux_x86_64_traits(x86_64_encoding, linux_traits):
     SYS_write = 1
     SYS_exit = 231       # actually SYS_exit_group
 
@@ -353,7 +362,7 @@ class linux_x86_64_traits(x86_64_encoding):
         return res
 
 
-class linux_i386_traits(i386_encoding):
+class linux_i386_traits(i386_encoding, linux_traits):
     SYS_write = 4
     SYS_exit = 252       # actually SYS_exit_group
 
@@ -380,7 +389,7 @@ class linux_i386_traits(i386_encoding):
         return res
 
 
-class linux_rv32_traits(rv32_encoding):
+class linux_rv32_traits(rv32_encoding, linux_traits):
     SYS_write = 64
     SYS_exit = 94       # actually SYS_exit_group
 
@@ -407,7 +416,7 @@ class linux_rv32_traits(rv32_encoding):
         return res
 
 
-class linux_rv64_traits(rv64_encoding):
+class linux_rv64_traits(rv64_encoding, linux_traits):
     SYS_write = 64
     SYS_exit = 94       # actually SYS_exit_group
 
@@ -434,7 +443,7 @@ class linux_rv64_traits(rv64_encoding):
         return res
 
 
-class linux_arm_traits(arm_encoding):
+class linux_arm_traits(arm_encoding, linux_traits):
     SYS_write = 4
     SYS_exit = 248       # actually SYS_exit_group
 
@@ -461,7 +470,7 @@ class linux_arm_traits(arm_encoding):
         return res
 
 
-class linux_aarch64_traits(aarch64_encoding):
+class linux_aarch64_traits(aarch64_encoding, linux_traits):
     SYS_write = 64
     SYS_exit = 94       # actually SYS_exit_group
 
@@ -485,6 +494,33 @@ class linux_aarch64_traits(aarch64_encoding):
     def gen_syscall(cls, nr):
         res = cls.gen_loadimm(cls.x8, nr)
         res += (0xd4000001).to_bytes(4, cls.endian)  # svc #0
+        return res
+
+
+class freebsd_x86_64_traits(x86_64_encoding, freebsd_traits):
+    SYS_write = 4
+    SYS_exit = 1
+
+    @staticmethod
+    def get_endian():
+        return elfdef.ELFDATA2LSB
+
+    syscall_arg_regs = [
+        x86_64_encoding.rDI,
+        x86_64_encoding.rSI,
+        x86_64_encoding.rDX,
+        x86_64_encoding.rCX,
+        x86_64_encoding.r8,
+        x86_64_encoding.r9
+    ]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
+
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.rAX, nr)
+        res += b'\x0f\x05'                          # syscall
         return res
 
 
@@ -676,8 +712,8 @@ class elf64_traits(object):
 
 
 class elf(object):
-    def __init__(self, machine, bits):
-        self.libelf = ctypes.cdll.LoadLibrary('/$LIB/libelf.so.1')
+    def __init__(self, arch_os_traits):
+        self.libelf = ctypes.cdll.LoadLibrary(arch_os_traits.libelfdso)
         if self.libelf.elf_version(elfdef.EV_CURRENT) != elfdef.EV_CURRENT:
             raise RuntimeError("invalid libelf version")
         self.libelf.elf_begin.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
@@ -696,7 +732,7 @@ class elf(object):
         self.libelf.elf_ndxscn.restype = (ctypes.c_size_t)
         self.libelf.elf_getscn.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
         self.libelf.elf_getscn.restype = (ctypes.c_void_p)
-        self.traits = elf64_traits(self, machine, self.libelf) if bits == 64 else elf32_traits(self, machine, self.libelf)
+        self.traits = elf64_traits(self, arch_os_traits.elf_machine, self.libelf) if arch_os_traits.nbits == 64 else elf32_traits(self, arch_os_traits.elf_machine, self.libelf)
         self.shstrtab = elfstrtab()
         self.sectionidx = dict()
         # It should not be necessary to customize the alignment values.
@@ -822,7 +858,10 @@ known_arch_os = {
         'rv64*': linux_rv64_traits,
         'armv[78]*': linux_arm_traits,
         'aarch64': linux_aarch64_traits,
-    }
+    },
+    'FreeBSD': {
+        'amd64': freebsd_x86_64_traits,
+    },
 }
 
 
@@ -841,7 +880,7 @@ class Config(object):
         else:
             fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
 
-        self.e = elf(self.arch_os_traits.elf_machine, self.arch_os_traits.nbits)
+        self.e = elf(self.arch_os_traits)
         if not self.e.open(fd):
             raise RuntimeError("cannot open elf")
 

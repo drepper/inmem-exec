@@ -4,6 +4,7 @@
 #include <libelf.h>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <memory>
 #include <unistd.h>
 #include <unordered_map>
@@ -16,7 +17,6 @@ struct traits;
 template<> struct traits<32> {
   static constexpr int elfclass = ELFCLASS32;
   using Word = Elf32_Word;
-  using Xword = Elf32_Xword;
   using Addr = Elf32_Addr;
   static constexpr int machine = EM_386;
   static auto newehdr(Elf* elf) { return elf32_newehdr(elf); }
@@ -27,7 +27,6 @@ template<> struct traits<32> {
 template<> struct traits<64> {
   static constexpr int elfclass = ELFCLASS64;
   using Word = Elf64_Word;
-  using Xword = Elf64_Xword;
   using Addr = Elf64_Addr;
   static constexpr int machine = EM_X86_64;
   static auto newehdr(Elf* elf) { return elf64_newehdr(elf); }
@@ -78,7 +77,7 @@ struct shstrtab_type {
 } shstrbuf;
 
 template<typename Traits, typename Buf>
-auto newscn(Elf* elf, const std::string& name, typename Traits::Word type, typename Traits::Xword flags, Buf& buf, size_t align)
+auto newscn(Elf* elf, const std::string& name, typename Traits::Word type, auto flags, Buf& buf, size_t align)
 {
   auto scn = elf_newscn(elf);
   auto shdr = Traits::getshdr(scn);
@@ -189,7 +188,7 @@ void genelf(int fd)
   phdr[codeidx].p_memsz = phdr[codeidx].p_filesz;
   phdr[codeidx].p_align = sysconf(_SC_PAGESIZE);
 
-  elf_update(elf, ELF_C_WRITE_MMAP);
+  elf_update(elf, ELF_C_WRITE);
 
   elf_end(elf);
 }
