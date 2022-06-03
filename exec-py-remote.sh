@@ -19,8 +19,17 @@ if [ $# -gt 0 ]; then
 else
   jump=''
 fi
+
+prog=$'\'import sys;
+import gzip;
+import os;
+exec(gzip.decompress(sys.stdin.buffer.read(int.from_bytes(sys.stdin.buffer.read(4),\"little\"))).decode(\"ASCII\"));\''
+
 if [ $interactive -ne 0 ]; then
-  (python gencompress.py "$infile"; cat) | ssh $jump $host python -c \'import sys\; import gzip\; exec\(gzip.decompress\(sys.stdin.buffer.read\(int.from_bytes\(sys.stdin.buffer.read\(4\),\"little\"\)\)\).decode\(\"ASCII\"\)\)\'
+  (python gencompress.py "$infile"; cat) | ssh $jump $host python -c $prog
+  exit $?
 else
-  python gencompress.py "$infile" | ssh $jump $host python -c \'import sys\; import gzip\; exec\(gzip.decompress\(sys.stdin.buffer.read\(int.from_bytes\(sys.stdin.buffer.read\(4\),\"little\"\)\)\).decode\(\"ASCII\"\)\)\'
+  python gencompress.py "$infile" | ssh $jump $host python -c $prog
+  exit $?
 fi
+exit 1
