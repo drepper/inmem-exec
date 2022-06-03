@@ -23,7 +23,7 @@ fi
 prog=$'\'import sys;
 import gzip;
 import os;
-exec(gzip.decompress(sys.stdin.buffer.read(int.from_bytes(sys.stdin.buffer.read(4),\"little\"))).decode(\"ASCII\"));\''
+exec(gzip.decompress(sys.stdin.buffer.read(int.from_bytes(sys.stdin.buffer.read(4),"little"))).decode("ASCII"));\''
 
 if [ $interactive -ne 0 ]; then
   (python gencompress.py "$infile"; cat) | ssh $jump $host python -c $prog
