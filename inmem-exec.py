@@ -19,6 +19,8 @@ class RelType(enum.Enum):
     rvlo = 3
     armmovwabs = 4
     armmovtabs = 5
+    aarch64lo16abs = 6
+    aarch64hi16abs = 7
 
 
 @dataclass
@@ -278,6 +280,51 @@ class arm_encoding:
         return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs) ]
 
 
+class aarch64_encoding:
+    nbits = 64           # processor bits
+    elf_machine = elfdef.EM_AARCH64
+    endian = 'little'
+
+    x0 = 0b00000
+    x1 = 0b00001
+    x2 = 0b00010
+    x3 = 0b00011
+    x4 = 0b00100
+    x5 = 0b00101
+    x6 = 0b00110
+    x7 = 0b00111
+    x8 = 0b01000
+
+    @classmethod
+    def gen_loadimm(cls, reg, val, width = 0, signed = False):
+        if val >= 0 and val < 65536:
+            res = (0xd2800000 | (val << 5) | reg).to_bytes(4, cls.endian)
+        elif val < 0 and -val >= 0x10000:
+            res = (0x92800000 | ((-val - 1) << 5) | reg).to_bytes(4, cls.endian)
+        elif -val == 0x10001:
+            res = (0x92a00020 | reg).to_bytes(4, cls.endian)
+        elif val < 0 and -val <= 0xffffffff:
+            res = (0x92800000 | (((-val & 0xffff) - 1) << 5) | reg).to_bytes(4, cls.endian)
+            res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg).to_bytes(4, cls.endian)
+        elif val >= 0 and val <= 0xffffffff:
+            res = (0xd2800000 | ((val & 0xffff) << 5) | reg).to_bytes(4, cls.endian)
+            res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg).to_bytes(4, cls.endian)
+        return res
+
+    @classmethod
+    def gen_loadmem(cls, reg, width, signed = False):
+        res1 = (0xd2800000 | reg).to_bytes(4, cls.endian)
+        res2 = (0xf2a00000 | reg).to_bytes(4, cls.endian)
+        res3 = ((0xf9400000 if width == 8 else 0xb9400000) | (reg << 5) | reg).to_bytes(4, cls.endian)
+        return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
+
+    @classmethod
+    def gen_loadref(cls, reg, offset):
+        res1 = (0xd2800000 | reg).to_bytes(4, cls.endian)
+        res2 = (0xf2a00000 | reg).to_bytes(4, cls.endian)
+        return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs) ]
+
+
 # OS+CPU traits
 class linux_x86_64_traits(x86_64_encoding):
     SYS_write = 1
@@ -411,6 +458,33 @@ class linux_arm_traits(arm_encoding):
     def gen_syscall(cls, nr):
         res = cls.gen_loadimm(cls.r7, nr)
         res += (0xef000000).to_bytes(4, cls.endian)  # swi #0
+        return res
+
+
+class linux_aarch64_traits(aarch64_encoding):
+    SYS_write = 64
+    SYS_exit = 94       # actually SYS_exit_group
+
+    @classmethod
+    def get_endian(cls):
+        return elfdef.ELFDATA2LSB if cls.endian == 'little' else elfdef.ELFDATA2MSB
+
+    syscall_arg_regs = [
+        aarch64_encoding.x0,
+        aarch64_encoding.x1,
+        aarch64_encoding.x2,
+        aarch64_encoding.x3,
+        aarch64_encoding.x4,
+        aarch64_encoding.x5
+    ]
+    @classmethod
+    def get_syscall_arg_reg(cls, nr):
+        return cls.syscall_arg_regs[nr]
+
+    @classmethod
+    def gen_syscall(cls, nr):
+        res = cls.gen_loadimm(cls.x8, nr)
+        res += (0xd4000001).to_bytes(4, cls.endian)  # svc #0
         return res
 
 
@@ -689,36 +763,34 @@ class elf(object):
                 off -= refdata.contents.size
                 refdata = self.getdata(refscn, refdata)
 
+            buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
             match r.reltype:
                 case RelType.abs4:
                     assert off + 4 <= refdata.contents.size
-                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + defval).to_bytes(4, 'little') + buf[off+4:]
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case RelType.rvhi:
                     assert off + 4 <= refdata.contents.size
-                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + (defval & 0xfffff000)).to_bytes(4, 'little') + buf[off+4:]
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case RelType.rvlo:
                     assert off + 4 <= refdata.contents.size
-                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfff) << 20)).to_bytes(4, 'little') + buf[off+4:]
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case RelType.armmovtabs:
                     assert off + 4 <= refdata.contents.size
-                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     immhi = ((defval >> 12) & 0xf0000) | ((defval >> 16) & 0xfff)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + immhi).to_bytes(4, 'little') + buf[off+4:]
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
                 case RelType.armmovwabs:
                     assert off + 4 <= refdata.contents.size
-                    buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
                     immlo = ((defval << 4) & 0xf0000) | (defval & 0xfff)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + immlo).to_bytes(4, 'little') + buf[off+4:]
-                    refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
+                case RelType.aarch64lo16abs:
+                    assert off + 4 <= refdata.contents.size
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xffff) << 5)).to_bytes(4, 'little') + buf[off+4:]
+                case RelType.aarch64hi16abs:
+                    assert off + 4 <= refdata.contents.size
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval >> 11) & 0x1fffe0)).to_bytes(4, 'little') + buf[off+4:]
                 case _:
                     raise ValueError('invalid relocation type')
+            refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
 
     def firstlastaddr(self, names, loadaddr):
         offset = -1
@@ -749,6 +821,7 @@ known_arch_os = {
         'rv32*': linux_rv32_traits,
         'rv64*': linux_rv64_traits,
         'armv[78]*': linux_arm_traits,
+        'aarch64': linux_aarch64_traits,
     }
 }
 
@@ -784,7 +857,7 @@ class Config(object):
     def execute(self, args):
         if os.execve in os.supports_fd:
             try:
-                os.execve(self.e.fd, [ self.fname ] + args, dict())
+                os.execve(self.e.fd, [ self.fname ] + args, os.environ)
             except OSError:
                 exit(99)
         raise RuntimeError(f'platform {platform.system()} does not support execve on file descriptor')
