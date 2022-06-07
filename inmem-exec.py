@@ -12,6 +12,48 @@ from dataclasses import dataclass
 
 
 @enum.unique
+class RegType(enum.Enum):
+    int32 = 1
+    int64 = 2
+    ptr = 3
+    float32 = 4
+    float64 = 5
+
+
+def get_type(value):
+    match value:
+        case ast.Constant(value):
+            if type(value) == int:
+                return RegType.int32 if value >= -2**31 and value < 2**31 else RegType.int64
+            if type(value) == str:
+                return RegType.ptr
+            if type(value) == float:
+                return RegType.float64
+        case str(s):
+            if s == 'int32':
+                return RegType.int32
+            if s == 'int64':
+                return RegType.int64
+            if s == 'ptr':
+                return RegType.ptr
+            if s == 'float32':
+                return RegType.float32
+            if s == 'float64':
+                return RegType.float64
+    raise RuntimeError(f'invalid value type {type(value)}')
+
+
+def get_type_size(t: RegType):
+    match t:
+        case RegType.int32 | RegType.float32 | RegType.ptr:
+            return 4
+        case RegType.int64 | RegType.float64:
+            return 8
+        case _:
+            raise RuntimeError(f'no size for type {t}')
+
+
+@enum.unique
 class RelType(enum.Enum):
     none = 0
     abs4 = 1
@@ -37,6 +79,43 @@ class Relocation:
     section: bytes
     offset: int
     reltype: RelType
+
+
+class RegMask(object):
+    def __init__(self, **kwargs):
+        if 'n' in kwargs:
+            self.n = kwargs['n']
+            self.a = [ False ] * self.n
+        elif 'src' in kwargs and type(kwargs['src']) == RegMask:
+            self.n = kwargs['src'].n
+            self.a = kwargs['src'].a.copy()
+        else:
+            raise RuntimeError('invalid constructor for RegMask')
+
+    def clear(self):
+        self.a = [ False ] * self.n
+
+    def __setitem__(self, key, val):
+        if type(key) == slice:
+            r = range(key.start if key.start else 0, key.stop if key.stop else len(self.a), key.step if key.step else 1)
+            if type(val) == list:
+                for i,ii in enumerate(r):
+                    self.a[ii] = val[i % len(val)]
+            else:
+                for ii in r:
+                    self.a[ii] = val
+        else:
+            self.a[key] = val
+
+    def __getitem__(self, key):
+        return self.a[key]
+
+
+class Register(object):
+    def __init__(self, regtype: RegType, n: int):
+        assert type(n) == int
+        self.is_int = regtype == RegType.int32 or regtype == RegType.int64 or regtype == RegType.ptr
+        self.n = n
 
 
 class elfdef(object):
@@ -76,6 +155,9 @@ class x86_64_encoding:
     nbits = 64           # processor bits
     elf_machine = elfdef.EM_X86_64
 
+    n_int_regs = 16
+    n_fp_regs = 16
+
     rAX = 0b0000
     rCX = 0b0001
     rDX = 0b0010
@@ -95,29 +177,77 @@ class x86_64_encoding:
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
-        rex = 0x41 if reg >= 8 else 0
-        if (val < -2147483648 or val > 2147483647) if signed else val > 4294967295:
-            rex |= 0x48
-            valwidth = 8
+        if reg.is_int:
+            rex = 0x41 if reg.n >= 8 else 0
+            if (val < -2147483648 or val > 2147483647) if signed else val > 4294967295:
+                rex |= 0x48
+                valwidth = 8
+            else:
+                valwidth = 4
+            res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg.n & 0b111)).to_bytes(1, 'little') + val.to_bytes(valwidth, 'little')
+            return res
         else:
-            valwidth = 4
-        res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + val.to_bytes(valwidth, 'little')
-        return res
+            raise RuntimeError('fp loadimm not yet handled')
 
-    @staticmethod
-    def gen_loadmem(reg, width):
-        rex = 0x44 if reg >= 8 else 0
-        if width > 4:
-            rex |= 0x48
-        res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
-        return [ (res, (4 if rex else 3), RelType.abs4) ]
+    @classmethod
+    def gen_loadmem(cls, reg, width):
+        if reg.is_int:
+            rex = 0x44 if reg.n >= 8 else 0
+            if width > 4:
+                rex |= 0x48
+            res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
+            return [ (res, (4 if rex else 3), RelType.abs4) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
     @staticmethod
     def gen_loadref(reg, offset):
         # We always assume a small memory model, references are 4 bytes
-        rex = 0x41 if reg >= 8 else 0
-        res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg & 0b111)).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
+        assert reg.is_int
+        rex = 0x41 if reg.n >= 8 else 0
+        res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg.n & 0b111)).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
         return [ (res, (2 if rex else 1), RelType.abs4) ]
+
+    @classmethod
+    def gen_saveimm(cls, val, width):
+        if type(val.value) != int or width > 4:
+            return False
+        if width == 4:
+            res = b'\xc7'
+        elif width == 2:
+            res = b'\x66\xc7'
+        else:
+            res = b'\xc6'
+        off = 2 + len(res)
+        res += b'\x04\x25\x00\x00\x00\x00' + val.value.to_bytes(width, 'little')
+        return [ (res, off, RelType.abs4) ]
+
+    @classmethod
+    def gen_savemem(cls, reg, width):
+        if reg.is_int:
+            rex = 0x44 if reg.n >= 8 else 0
+            if width > 4:
+                rex |= 0x48
+            res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x89' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
+            return [ (res, (4 if rex else 3), RelType.abs4) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
+
+    @classmethod
+    def get_n_registers(cls):
+        return cls.n_int_regs + cls.n_fp_regs
+
+    @classmethod
+    def get_int_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[:cls.n_int_regs] = True
+        return res
+
+    @classmethod
+    def get_fp_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[cls.n_int_regs:] = True
+        return res
 
 
 class i386_encoding:
@@ -133,21 +263,69 @@ class i386_encoding:
     rSI = 0b110
     rDI = 0b111
 
+    n_int_regs = 8
+    n_fp_regs = 8
+
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
-        res = (0xb8 + reg).to_bytes(1, 'little') + val.to_bytes(4, 'little')
-        return res
+        if reg.is_int:
+            res = (0xb8 + reg.n).to_bytes(1, 'little') + val.to_bytes(4, 'little')
+            return res
+        else:
+            raise RuntimeError('fp loadimm not yet handled')
 
     @staticmethod
     def gen_loadmem(reg, width):
-        res = b'\x8b' + (0x05 + (reg << 3)).to_bytes(1, 'little') + b'\x00\x00\x00\x00'
-        return [ (res, 2, RelType.abs4) ]
+        if reg.is_int:
+            res = b'\x8b' + (0x05 + (reg.n << 3)).to_bytes(1, 'little') + b'\x00\x00\x00\x00'
+            return [ (res, 2, RelType.abs4) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
     @staticmethod
     def gen_loadref(reg, offset):
         # We always assume a small memory model, references are 4 bytes
-        res = (0xb8 + reg).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
+        assert reg.is_int
+        res = (0xb8 + reg.n).to_bytes(1, 'little') + offset.to_bytes(4, 'little')
         return [ (res, 1, RelType.abs4) ]
+
+    @classmethod
+    def gen_saveimm(cls, val, width):
+        if type(val.value) != int:
+            return False
+        if width == 4:
+            res = b'\xc7'
+        elif width == 2:
+            res = b'\x66\xc7'
+        else:
+            res = b'\xc6'
+        off = 2 + len(res)
+        res += b'\x04\x25\x00\x00\x00\x00' + val.value.to_bytes(width, 'little')
+        return [ (res, off, RelType.abs4) ]
+
+    @classmethod
+    def gen_savemem(cls, reg, width):
+        if reg.is_int:
+            res = b'\x89' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
+            return [ (res, 3, RelType.abs4) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
+
+    @classmethod
+    def get_n_registers(cls):
+        return cls.n_int_regs + cls.n_fp_regs
+
+    @classmethod
+    def get_int_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[:cls.n_int_regs] = True
+        return res
+
+    @classmethod
+    def get_fp_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[cls.n_int_regs:] = True
+        return res
 
 
 class rv32_encoding:
@@ -162,6 +340,9 @@ class rv32_encoding:
     rA5 = 0b01111
     rA6 = 0b10000
     rA7 = 0b10001
+
+    n_int_regs = 32
+    n_fp_regs = 32
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -191,6 +372,22 @@ class rv32_encoding:
         res2 = word2.to_bytes(4, 'little')
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
+    @classmethod
+    def get_n_registers(cls):
+        return cls.n_int_regs + cls.n_fp_regs
+
+    @classmethod
+    def get_int_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[:cls.n_int_regs] = True
+        return res
+
+    @classmethod
+    def get_fp_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[cls.n_int_regs:] = True
+        return res
+
 
 class rv64_encoding:
     nbits = 64           # processor bits
@@ -204,6 +401,9 @@ class rv64_encoding:
     rA5 = 0b01111
     rA6 = 0b10000
     rA7 = 0b10001
+
+    n_int_regs = 32
+    n_fp_regs = 32
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -234,6 +434,22 @@ class rv64_encoding:
         res2 = word2.to_bytes(4, 'little')
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
+    @classmethod
+    def get_n_registers(cls):
+        return cls.n_int_regs + cls.n_fp_regs
+
+    @classmethod
+    def get_int_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[:cls.n_int_regs] = True
+        return res
+
+    @classmethod
+    def get_fp_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[cls.n_int_regs:] = True
+        return res
+
 
 class arm_encoding:
     nbits = 32           # processor bits
@@ -248,6 +464,9 @@ class arm_encoding:
     r5 = 0b0101
     r6 = 0b0110
     r7 = 0b0111
+
+    n_int_regs = 16
+    n_fp_regs = 16
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
@@ -279,6 +498,22 @@ class arm_encoding:
         res2 = (0xe3400000 | (reg << 12)).to_bytes(4, cls.endian)
         return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs) ]
 
+    @classmethod
+    def get_n_registers(cls):
+        return cls.n_int_regs + cls.n_fp_regs
+
+    @classmethod
+    def get_int_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[:cls.n_int_regs] = True
+        return res
+
+    @classmethod
+    def get_fp_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[cls.n_int_regs:] = True
+        return res
+
 
 class aarch64_encoding:
     nbits = 64           # processor bits
@@ -294,6 +529,9 @@ class aarch64_encoding:
     x6 = 0b00110
     x7 = 0b00111
     x8 = 0b01000
+
+    n_int_regs = 16
+    n_fp_regs = 16
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
@@ -324,6 +562,22 @@ class aarch64_encoding:
         res2 = (0xf2a00000 | reg).to_bytes(4, cls.endian)
         return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs) ]
 
+    @classmethod
+    def get_n_registers(cls):
+        return cls.n_int_regs + cls.n_fp_regs
+
+    @classmethod
+    def get_int_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[:cls.n_int_regs] = True
+        return res
+
+    @classmethod
+    def get_fp_reg_mask(cls):
+        res = RegMask(n = cls.get_n_registers())
+        res[cls.n_int_regs:] = True
+        return res
+
 
 # OS traits
 class linux_traits:
@@ -353,11 +607,11 @@ class linux_x86_64_traits(x86_64_encoding, linux_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int64, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
-        res = cls.gen_loadimm(cls.rAX, nr)
+        res = cls.gen_loadimm(Register(RegType.int64, cls.rAX), nr)
         res += b'\x0f\x05'                          # syscall
         return res
 
@@ -380,11 +634,11 @@ class linux_i386_traits(i386_encoding, linux_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int32, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
-        res = cls.gen_loadimm(cls.rAX, nr)
+        res = cls.gen_loadimm(Register(RegType.int32, cls.rAX), nr)
         res += b'\xcd\x80'                          # int $0x80
         return res
 
@@ -434,7 +688,7 @@ class linux_rv64_traits(rv64_encoding, linux_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int64, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
@@ -461,7 +715,7 @@ class linux_arm_traits(arm_encoding, linux_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int32, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
@@ -488,7 +742,7 @@ class linux_aarch64_traits(aarch64_encoding, linux_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int64, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
@@ -515,7 +769,7 @@ class freebsd_x86_64_traits(x86_64_encoding, freebsd_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int32, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
@@ -927,16 +1181,16 @@ class Program(Config):
         self.codebuf = bytebuf()
         self.rodatabuf = bytebuf()
         self.databuf = bytebuf()
+        self.reg_used = RegMask(n = self.arch_os_traits.get_n_registers())
 
     def gen_id(self, prefix = ''):
         res = '.L' + prefix + str(self.id)
         self.id += 1
         return res
 
-    def gen_load_arg(self, is_syscall, n, a):
-        reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
+    def gen_load_val(self, reg, a):
         match a:
-            case int(val):
+            case ast.Constant(val):
                 self.codebuf += self.arch_os_traits.gen_loadimm(reg, val)
             case Symbol(_):
                 for code, add, rel in self.arch_os_traits.gen_loadmem(reg, self.symbols[a.name].size):
@@ -947,7 +1201,11 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
 
-    def gen_load_ref(self, is_syscall, n, a):
+    def gen_load_arg(self, is_syscall, n, a):
+        reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
+        self.gen_load_val(reg, a)
+
+    def gen_load_refarg(self, is_syscall, n, a):
         reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
         match a:
             case Symbol(_):
@@ -958,6 +1216,30 @@ class Program(Config):
                         self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
+
+    def gen_save_val(self, a, resexpr):
+        if type(resexpr) == ast.Constant and hasattr(self.arch_os_traits, 'gen_saveimm'):
+            res = self.arch_os_traits.gen_saveimm(resexpr, self.symbols[a.name].size)
+            if res:
+                for code, add, rel in res:
+                    add += len(self.codebuf)
+                    self.codebuf += code
+                    if rel != RelType.none:
+                        self.relocations.append(Relocation(a.name, b'.text', add, rel))
+                return
+        reg = self.force_reg(resexpr)
+        self.gen_save_val(self.symbols[target], reg)
+        match a:
+            case Symbol(_):
+                for code, add, rel in self.arch_os_traits.gen_savemem(reg, self.symbols[a.name].size):
+                    add += len(self.codebuf)
+                    self.codebuf += code
+                    if rel != RelType.none:
+                        self.relocations.append(Relocation(a.name, b'.text', add, rel))
+            case _:
+                raise RuntimeError(f'invalid store address {a}')
+        self.free_register(reg)
+
 
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
@@ -1033,98 +1315,122 @@ class Program(Config):
 
         return self
 
+    def clear_reg_use(self):
+        self.reg_used.clear()
 
-def get_type(value):
-    match value:
-        case ast.Constant(value):
-            if type(value) == int:
-                return 'int'
-            if type(value) == str:
-                return 'str'
-    raise RuntimeError('invalid value type')
+    def get_reg_unused(self, regtype):
+        match regtype:
+            case RegType.int32 | RegType.int64 | RegType.ptr:
+                mask = self.arch_os_traits.get_int_reg_mask()
+            case RegType.fp:
+                mask = self.arch_os_traits.get_float_reg_mask()
+            case _:
+                raise RuntimeError(f'invalid register type {regtype}')
+        for i,u in enumerate(self.reg_used):
+            if not u and mask[i]:
+                self.reg_used[i] = True
+                return Register(regtype, i)
+        raise RuntimeError('too many registers used')
 
+    def force_reg(self, reg):
+        self.reg_used[reg.n] = False
 
-def define_variable(program, var, ann, value):
-    match ann:
-        case 'int':
-            size = 4
-        case 'long' | 'ptr':
-            size = program.arch_os_traits.nbits / 8
-        case _:
-            raise RuntimeError('invalid annotation')
-    addr = len(program.databuf)
-    if addr % size != 0:
-        npad = size * ((addr + size - 1) // size) - addr
-        program.databuf += b'\x00' * npad
-        addr += npad
-    program.symbols[var] = Symbol(var, size, b'.data', addr)
-    match value:
-        case ast.Constant(v) if type(v) == int:
-            program.databuf += v.to_bytes(size, program.get_endian_str())
-        case _:
-            raise RuntimeError('invalid variable value')
+    def define_variable(self, var, ann, value):
+        size = get_type_size(ann)
+        addr = len(self.databuf)
+        if addr % size != 0:
+            npad = size * ((addr + size - 1) // size) - addr
+            self.databuf += b'\x00' * npad
+            addr += npad
+        self.symbols[var] = Symbol(var, size, b'.data', addr)
+        match value:
+            case ast.Constant(v) if type(v) == int:
+                self.databuf += v.to_bytes(size, self.get_endian_str())
+            case _:
+                raise RuntimeError('invalid variable value')
 
+    def store_cstring(self, s):
+        offset = len(self.rodatabuf)
+        self.rodatabuf += bytes(s, self.encoding) + b'\x00'
+        id = self.gen_id('str')
+        self.symbols[id] = Symbol(id, len(self.rodatabuf) - offset, b'.rodata', offset)
+        return id
 
-def store_cstring(program, s):
-    offset = len(program.rodatabuf)
-    program.rodatabuf += bytes(s, program.encoding) + b'\x00'
-    id = program.gen_id('str')
-    program.symbols[id] = Symbol(id, len(program.rodatabuf) - offset, b'.rodata', offset)
-    return id
+    def force_reg(self, expr):
+        match expr:
+            case ast.Constant(_):
+                reg = self.get_reg_unused(get_type(expr))
+                self.gen_load_val(reg, expr)
+                return reg
+            case Register(_):
+                # Already in a register
+                return expr
+            case _:
+                raise RuntimeError(f'cannot force {expr} into register')
 
-
-def compile_body(body, program):
-    for e in body:
+    def compile_expr(self, e):
         match e:
-            case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
-                is_syscall = program.known_syscall(name)
-
-                for idx, a in enumerate(args):
-                    match a:
-                        case ast.Constant(s) if type(s) == int:
-                            program.gen_load_arg(is_syscall, idx, s)
-                        case ast.Constant(s) if type(s) == str:
-                            id = store_cstring(program, s)
-                            program.gen_load_ref(is_syscall, idx, program.symbols[id])
-                        case ast.Name(id,_):
-                            program.gen_load_arg(is_syscall, idx, program.symbols[id])
-                        case _:
-                            raise RuntimeError(f'unhandled function parameter type {a}')
-                if is_syscall:
-                    program.gen_syscall(name, *args)
-                else:
-                    # XYZ generate code
-                    print(f'function {name} with {len(args)} arguments')
+            case ast.Constant(value):
+                return e
             case _:
-                raise RuntimeError(f'unhandled function call {e}')
+                raise RuntimeError('unhandled expression type')
 
+    def compile_body(self, body):
+        for e in body:
+            self.clear_reg_use()
+            match e:
+                case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
+                    is_syscall = self.known_syscall(name)
 
-def compile(source, system = None, processor = None):
-    program = Program(system, processor)
-    tree = ast.parse(source)
+                    for idx, a in enumerate(args):
+                        match a:
+                            case ast.Constant(s) if type(s) == int:
+                                self.gen_load_arg(is_syscall, idx, a)
+                            case ast.Constant(s) if type(s) == str:
+                                id = self.store_cstring(s)
+                                self.gen_load_refarg(is_syscall, idx, self.symbols[id])
+                            case ast.Name(id,_):
+                                self.gen_load_arg(is_syscall, idx, self.symbols[id])
+                            case _:
+                                raise RuntimeError(f'unhandled function parameter type {a}')
+                    if is_syscall:
+                        self.gen_syscall(name, *args)
+                    else:
+                        # XYZ generate code
+                        print(f'function {name} with {len(args)} arguments')
+                case ast.Assign([ ast.Name(target,_) ], expr):
+                    if not target in self.symbols:
+                        raise RuntimeError('assignment to unknown variable {target}')
+                    resexpr = self.compile_expr(expr)
+                    self.gen_save_val(self.symbols[target], resexpr)
+                case _:
+                    raise RuntimeError(f'unhandled function call {e}')
 
-    # print(ast.dump(tree, indent=2))
+    def compile(self, source):
+        tree = ast.parse(source)
 
-    for b in tree.body:
-        match b:
-            case ast.FunctionDef(name,_,_,_):
-                pass
-            case ast.Assign([ast.Name(target, _)],value):
-                define_variable(program, target, get_type(value), value)
-            case ast.AnnAssign(ast.Name(target, _),ast.Name(ann,_),value,_):
-                define_variable(program, target, ann, value)
-            case _:
-                raise RuntimeError(f'unhandled AST node {b}')
+        print(ast.dump(tree, indent=2))
 
-    for b in tree.body:
-        match b:
-            case ast.FunctionDef(name,_,_,_):
-                program.symbols[name] = Symbol(name, 0, b'.text', len(program.codebuf))
-                # XYZ handle arguments
-                compile_body(b.body, program)
-            # No need for further checks for valid values, it is done in the first loop
+        for b in tree.body:
+            match b:
+                case ast.FunctionDef(name,_,_,_):
+                    pass
+                case ast.Assign([ast.Name(target, _)],value):
+                    self.define_variable(target, get_type(value), value)
+                case ast.AnnAssign(ast.Name(target, _),ast.Name(ann,_),value,_):
+                    self.define_variable(target, get_type(ann), value)
+                case _:
+                    raise RuntimeError(f'unhandled AST node {b}')
 
-    return program
+        for b in tree.body:
+            match b:
+                case ast.FunctionDef(name,_,_,_):
+                    self.symbols[name] = Symbol(name, 0, b'.text', len(self.codebuf))
+                    # XYZ handle arguments
+                    self.compile_body(b.body)
+                # No need for further checks for valid values, it is done in the first loop
+
+        return self
 
 
 def main(fname, args):
@@ -1133,8 +1439,9 @@ def main(fname, args):
 def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
+    status = 0
     exit(status)
-status:int = 0
+status:int32 = 1
 '''
 
     system = None
@@ -1147,7 +1454,7 @@ status:int = 0
         processor = args[0]
         args = args[1:]
 
-    compile(source, system = system, processor = processor).elfgen(fname).execute(args)
+    Program(system = system, processor = processor).compile(source).elfgen(fname).execute(args)
 
 
 main(b'test', sys.argv[1:])
