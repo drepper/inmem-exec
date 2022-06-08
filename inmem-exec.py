@@ -488,53 +488,55 @@ class arm_encoding(RegAlloc):
     r7 = 0b0111
 
     def __init__(self):
-        super().__init__(self.n_int_regs, self.n_fp_regs)
+        super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
-        if val >= 0:
-            if val < 4096:
-                res = (0xe3a00000 | (reg << 12) | val).to_bytes(4, cls.endian)
+        if reg.is_int:
+            if val >= 0:
+                if val < 4096:
+                    res = (0xe3a00000 | (reg.n << 12) | val).to_bytes(4, cls.endian)
+                else:
+                    res = (0xe3000000 | ((val & 0xf000) << 4) | (reg.n << 12) | (val & 0xfff)).to_bytes(4, cls.endian)
+                    if val >= 65536:
+                        res += (0xe3400000 | ((val >> 12) & 0xf0000) | ((val >> 16) & 0xfff)).to_bytes(4, cls.endian)
             else:
-                res = (0xe3000000 | ((val & 0xf000) << 4) | (reg << 12) | (val & 0xfff)).to_bytes(4, cls.endian)
-                if val >= 65536:
+                if val >= -0x101:
+                    res = (0xe3e00000 | ~val).to_bytes(4, cls.endian)
+                else:
+                    res = (0xe3000000 | ((val & 0xf000) << 4) | (val & 0xfff)).to_bytes(4, cls.endian)
                     res += (0xe3400000 | ((val >> 12) & 0xf0000) | ((val >> 16) & 0xfff)).to_bytes(4, cls.endian)
+            return res
         else:
-            if val >= -0x101:
-                res = (0xe3e00000 | ~val).to_bytes(4, cls.endian)
-            else:
-                res = (0xe3000000 | ((val & 0xf000) << 4) | (val & 0xfff)).to_bytes(4, cls.endian)
-                res += (0xe3400000 | ((val >> 12) & 0xf0000) | ((val >> 16) & 0xfff)).to_bytes(4, cls.endian)
-        return res
+            raise RuntimeError('fp loadimm not yet handled')
 
     @classmethod
     def gen_loadmem(cls, reg, width, signed = False):
-        res1 = (0xe3000000 | (reg << 12)).to_bytes(4, cls.endian)
-        res2 = (0xe3400000 | (reg << 12)).to_bytes(4, cls.endian)
-        res3 = (0xe5900000 | (reg << 16) | (reg << 12)).to_bytes(4, cls.endian)
-        return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs), (res3, 0, RelType.none) ]
+        if reg.is_int:
+            res1 = (0xe3000000 | (reg.n << 12)).to_bytes(4, cls.endian)
+            res2 = (0xe3400000 | (reg.n << 12)).to_bytes(4, cls.endian)
+            res3 = (0xe5900000 | (reg.n << 16) | (reg.n << 12)).to_bytes(4, cls.endian)
+            return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs), (res3, 0, RelType.none) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
     @classmethod
     def gen_loadref(cls, reg, offset):
-        res1 = (0xe3000000 | (reg << 12)).to_bytes(4, cls.endian)
-        res2 = (0xe3400000 | (reg << 12)).to_bytes(4, cls.endian)
+        assert reg.is_int
+        res1 = (0xe3000000 | (reg.n << 12)).to_bytes(4, cls.endian)
+        res2 = (0xe3400000 | (reg.n << 12)).to_bytes(4, cls.endian)
         return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs) ]
 
-    @classmethod
-    def get_n_registers(cls):
-        return cls.n_int_regs + cls.n_fp_regs
-
-    @classmethod
-    def get_int_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[:cls.n_int_regs] = True
-        return res
-
-    @classmethod
-    def get_fp_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[cls.n_int_regs:] = True
-        return res
+    def gen_savemem(self, reg, width):
+        if reg.is_int:
+            addrreg = self.get_unused_reg(RegType.ptr)
+            res1 = (0xe3000000 | (addrreg.n << 12)).to_bytes(4, self.endian)
+            res2 = (0xe3400000 | (addrreg.n << 12)).to_bytes(4, self.endian)
+            res3 = (0xe5800000 | (addrreg.n << 16) | (reg.n << 12)).to_bytes(4, self.endian)
+            self.release_reg(addrreg)
+            return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs), (res3, 0, RelType.none) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
 
 class aarch64_encoding(RegAlloc):
@@ -556,52 +558,55 @@ class aarch64_encoding(RegAlloc):
     x8 = 0b01000
 
     def __init__(self):
-        super().__init__(self.n_int_regs, self.n_fp_regs)
+        super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
-        if val >= 0 and val < 65536:
-            res = (0xd2800000 | (val << 5) | reg).to_bytes(4, cls.endian)
-        elif val < 0 and -val >= 0x10000:
-            res = (0x92800000 | ((-val - 1) << 5) | reg).to_bytes(4, cls.endian)
-        elif -val == 0x10001:
-            res = (0x92a00020 | reg).to_bytes(4, cls.endian)
-        elif val < 0 and -val <= 0xffffffff:
-            res = (0x92800000 | (((-val & 0xffff) - 1) << 5) | reg).to_bytes(4, cls.endian)
-            res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg).to_bytes(4, cls.endian)
-        elif val >= 0 and val <= 0xffffffff:
-            res = (0xd2800000 | ((val & 0xffff) << 5) | reg).to_bytes(4, cls.endian)
-            res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg).to_bytes(4, cls.endian)
-        return res
+        if reg.is_int:
+            if val >= 0 and val < 65536:
+                res = (0xd2800000 | (val << 5) | reg.n).to_bytes(4, cls.endian)
+            elif val < 0 and -val >= 0x10000:
+                res = (0x92800000 | ((-val - 1) << 5) | reg.n).to_bytes(4, cls.endian)
+            elif -val == 0x10001:
+                res = (0x92a00020 | reg.n).to_bytes(4, cls.endian)
+            elif val < 0 and -val <= 0xffffffff:
+                res = (0x92800000 | (((-val & 0xffff) - 1) << 5) | reg.n).to_bytes(4, cls.endian)
+                res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg.n).to_bytes(4, cls.endian)
+            elif val >= 0 and val <= 0xffffffff:
+                res = (0xd2800000 | ((val & 0xffff) << 5) | reg.n).to_bytes(4, cls.endian)
+                res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg.n).to_bytes(4, cls.endian)
+            return res
+        else:
+            raise RuntimeError('fp loadimm not yet handled')
 
     @classmethod
     def gen_loadmem(cls, reg, width, signed = False):
-        res1 = (0xd2800000 | reg).to_bytes(4, cls.endian)
-        res2 = (0xf2a00000 | reg).to_bytes(4, cls.endian)
-        res3 = ((0xf9400000 if width == 8 else 0xb9400000) | (reg << 5) | reg).to_bytes(4, cls.endian)
-        return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
+        if reg.is_int:
+            res1 = (0xd2800000 | reg.n).to_bytes(4, cls.endian)
+            res2 = (0xf2a00000 | reg.n).to_bytes(4, cls.endian)
+            res3 = ((0xf9400000 if width == 8 else 0xb9400000) | (reg.n << 5) | reg.n).to_bytes(4, cls.endian)
+            return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
     @classmethod
     def gen_loadref(cls, reg, offset):
-        res1 = (0xd2800000 | reg).to_bytes(4, cls.endian)
-        res2 = (0xf2a00000 | reg).to_bytes(4, cls.endian)
+        # We always assume a small memory model, references are 4 bytes
+        assert reg.is_int
+        res1 = (0xd2800000 | reg.n).to_bytes(4, cls.endian)
+        res2 = (0xf2a00000 | reg.n).to_bytes(4, cls.endian)
         return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs) ]
 
-    @classmethod
-    def get_n_registers(cls):
-        return cls.n_int_regs + cls.n_fp_regs
-
-    @classmethod
-    def get_int_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[:cls.n_int_regs] = True
-        return res
-
-    @classmethod
-    def get_fp_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[cls.n_int_regs:] = True
-        return res
+    def gen_savemem(self, reg, width):
+        if reg.is_int:
+            addrreg = self.get_unused_reg(RegType.ptr)
+            res1 = (0xd2800000 | addrreg.n).to_bytes(4, self.endian)
+            res2 = (0xf2a00000 | addrreg.n).to_bytes(4, self.endian)
+            res3 = ((0xf9000000 if width == 8 else 0xb9000000) | (addrreg.n << 5) | reg.n).to_bytes(4, self.endian)
+            self.release_reg(addrreg)
+            return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
 
 # OS traits
@@ -744,7 +749,7 @@ class linux_arm_traits(arm_encoding, linux_traits):
 
     @classmethod
     def gen_syscall(cls, nr):
-        res = cls.gen_loadimm(cls.r7, nr)
+        res = cls.gen_loadimm(Register(RegType.int32, cls.r7), nr)
         res += (0xef000000).to_bytes(4, cls.endian)  # swi #0
         return res
 
@@ -771,7 +776,7 @@ class linux_aarch64_traits(aarch64_encoding, linux_traits):
 
     @classmethod
     def gen_syscall(cls, nr):
-        res = cls.gen_loadimm(cls.x8, nr)
+        res = cls.gen_loadimm(Register(RegType.int64, cls.x8), nr)
         res += (0xd4000001).to_bytes(4, cls.endian)  # svc #0
         return res
 
