@@ -374,8 +374,7 @@ class i386_encoding(RegAlloc):
             raise RuntimeError('fp binop not yet implemented')
 
 
-class rv32_encoding(RegAlloc):
-    nbits = 32           # processor bits
+class rv_encoding(RegAlloc):
     elf_machine = elfdef.EM_RISCV
 
     n_int_regs = 32
@@ -462,92 +461,12 @@ class rv32_encoding(RegAlloc):
             raise RuntimeError('fp binop not yet implemented')
 
 
-class rv64_encoding(RegAlloc):
+class rv32_encoding(rv_encoding):
+    nbits = 32           # processor bits
+
+
+class rv64_encoding(rv_encoding):
     nbits = 64           # processor bits
-    elf_machine = elfdef.EM_RISCV
-
-    n_int_regs = 32
-    n_fp_regs = 32
-
-    rA0 = 0b01010
-    rA1 = 0b01011
-    rA2 = 0b01100
-    rA3 = 0b01101
-    rA4 = 0b01110
-    rA5 = 0b01111
-    rA6 = 0b10000
-    rA7 = 0b10001
-
-    def __init__(self):
-        super().__init__(5, self.n_int_regs, 1, self.n_fp_regs)
-
-    @staticmethod
-    def gen_loadimm(reg, val, width = 0, signed = False):
-        if reg.is_int:
-            if val >= -2048 and val < 2048:
-                word = ((val & 0xfff) << 20) | (reg.n << 7) | 0b0010011
-                res = word.to_bytes(4, 'little')
-            else:
-                word1 = (val & 0xfffff000) | (reg.n << 7) | 0b0110111
-                word2 = ((val & 0xfff) << 20) | (reg.n << 15) | (reg.n << 7) | 0b0010011
-                res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
-            return res
-        else:
-            raise RuntimeError('fp loadimm not yet handled')
-
-    @staticmethod
-    def gen_loadmem(reg, width, signed = False):
-        if reg.is_int:
-            word1 = (reg.n << 7) | 0b0110111
-            res1 = word1.to_bytes(4, 'little')
-            logwidth = math.frexp(width)[1] - 1
-            word2 = (reg.n << 15) | ((logwidth | (0 if signed or width == 8 else 0b100)) << 12) | (reg.n << 7) | 0b0000011
-            res2 = word2.to_bytes(4, 'little')
-            return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
-        else:
-            raise RuntimeError('fp regs not yet handled')
-
-    @staticmethod
-    def gen_loadref(reg, offset):
-        # We always assume a small memory model, references are 4 bytes
-        assert reg.is_int
-        word1 = (reg.n << 7) | 0b0110111
-        res1 = word1.to_bytes(4, 'little')
-        word2 = (reg.n << 15) | (reg.n << 7) | 0b0010011
-        res2 = word2.to_bytes(4, 'little')
-        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
-
-    def gen_savemem(self, reg, width):
-        if reg.is_int:
-            addrreg = self.get_unused_reg(RegType.ptr)
-            word1 = (addrreg.n << 7) | 0b0110111
-            res1 = word1.to_bytes(4, 'little')
-            logwidth = math.frexp(width)[1] - 1
-            word2 = (reg.n << 20) | (addrreg.n << 15) | (logwidth << 12) | 0b0100011
-            res2 = word2.to_bytes(4, 'little')
-            self.release_reg(addrreg)
-            return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo2) ]
-        else:
-            raise RuntimeError('fp regs not yet handled')
-
-    @classmethod
-    def gen_binop(cls, resreg, rreg, op):
-        if resreg.is_int:
-            assert resreg.is_int
-            assert rreg.is_int
-            match op:
-                # XYZ always 64-bit operation
-                case ast.Add():
-                    word = 0b0110011
-                case ast.Sub():
-                    word = (0b0100000 << 25) | 0b0110011
-                case _:
-                    raise RuntimeError(f'unsupported binop {op}')
-            return (word | (rreg.n << 20) | (resreg.n << 15) | (resreg.n << 7)).to_bytes(4, 'little')
-        else:
-            assert not resreg.is_int
-            assert not rreg.is_int
-            raise RuntimeError('fp binop not yet implemented')
 
 
 class arm_encoding(RegAlloc):
