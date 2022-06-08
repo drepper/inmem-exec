@@ -1389,6 +1389,29 @@ class Program(Config):
         match e:
             case ast.Constant(value):
                 return e
+            case ast.BinOp(l, op, r):
+                l = self.compile_expr(l)
+                r = self.compile_expr(r)
+                match op:
+                    case ast.Add():
+                        if type(l) == ast.Constant and type(r) == ast.Constant:
+                            return ast.Constant(value=(l.value + r.value))
+                        raise RuntimeError(f'non-const Add result not supported')
+                    case ast.Sub():
+                        if type(l) == ast.Constant and type(r) == ast.Constant:
+                            return ast.Constant(value=(l.value - r.value))
+                        raise RuntimeError(f'non-const Sub result not supported')
+                    case _:
+                        raise RuntimeError(f'unsupport binop {op}')
+            case ast.UnaryOp(op, operand):
+                operand = self.compile_expr(operand)
+                match op:
+                    case ast.USub():
+                        if type(operand) == ast.Constant:
+                            return ast.Constant(value=-operand.value)
+                        raise RuntimeError(f'non-const USub result not supported')
+                    case _:
+                        raise RuntimeError(f'unsupported unaryop')
             case _:
                 raise RuntimeError('unhandled expression type')
 
@@ -1456,7 +1479,7 @@ def main(fname):
 def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
-    status = 0
+    status = -1 + 1 - 0
     exit(status)
 status:int32 = 1
 '''
