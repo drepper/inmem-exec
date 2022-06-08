@@ -70,6 +70,7 @@ class RelType(enum.Enum):
 class Symbol:
     name: str
     size: int
+    stype: RegType
     section: bytes
     addr: int
 
@@ -265,6 +266,27 @@ class x86_64_encoding(RegAlloc):
             return [ (res, (4 if rex else 3), RelType.abs4) ]
         else:
             raise RuntimeError('fp regs not yet handled')
+
+    @classmethod
+    def gen_binop(cls, resreg, rreg, op):
+        if resreg.is_int:
+            assert resreg.is_int
+            assert rreg.is_int
+            res = (0x48 | (1 if resreg.n >= 8 else 0) | (4 if rreg.n >= 8 else 0)).to_bytes(1, 'little')
+            match op:
+                # XYZ always 64-bit operation
+                case ast.Add():
+                    res += b'\x01'
+                case ast.Sub():
+                    res += b'\x29'
+                case _:
+                    raise RuntimeError(f'unsupported binop {op}')
+            res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
+            return res
+        else:
+            assert not resreg.is_int
+            assert not rreg.is_int
+            raise RuntimeError('fp binop not yet implemented')
 
 
 class i386_encoding(RegAlloc):
@@ -1274,6 +1296,15 @@ class Program(Config):
                 raise RuntimeError(f'invalid store address {a}')
         self.arch_os_traits.release_reg(reg)
 
+    def gen_binop(self, resreg, rreg, op):
+        # XYZ could implement subtraction with constant
+        resreg = self.force_reg(resreg)
+        rreg = self.force_reg(rreg)
+        res = self.arch_os_traits.gen_binop(resreg, rreg, op)
+        self.codebuf += res
+        self.arch_os_traits.release_reg(rreg)
+        return resreg
+
 
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
@@ -1359,7 +1390,7 @@ class Program(Config):
             npad = size * ((addr + size - 1) // size) - addr
             self.databuf += b'\x00' * npad
             addr += npad
-        self.symbols[var] = Symbol(var, size, b'.data', addr)
+        self.symbols[var] = Symbol(var, size, ann, b'.data', addr)
         match value:
             case ast.Constant(v) if type(v) == int:
                 self.databuf += v.to_bytes(size, self.get_endian_str())
@@ -1370,7 +1401,7 @@ class Program(Config):
         offset = len(self.rodatabuf)
         self.rodatabuf += bytes(s, self.encoding) + b'\x00'
         id = self.gen_id('str')
-        self.symbols[id] = Symbol(id, len(self.rodatabuf) - offset, b'.rodata', offset)
+        self.symbols[id] = Symbol(id, len(self.rodatabuf) - offset, RegType.ptr, b'.rodata', offset)
         return id
 
     def force_reg(self, expr):
@@ -1379,7 +1410,7 @@ class Program(Config):
                 reg = self.arch_os_traits.get_unused_reg(get_type(expr))
                 self.gen_load_val(reg, expr)
                 return reg
-            case Register(_):
+            case Register():
                 # Already in a register
                 return expr
             case _:
@@ -1389,20 +1420,22 @@ class Program(Config):
         match e:
             case ast.Constant(value):
                 return e
+            case ast.Name(id):
+                reg = self.arch_os_traits.get_unused_reg(self.symbols[id].stype)
+                self.gen_load_val(reg, self.symbols[id])
+                return reg
             case ast.BinOp(l, op, r):
                 l = self.compile_expr(l)
                 r = self.compile_expr(r)
-                match op:
-                    case ast.Add():
-                        if type(l) == ast.Constant and type(r) == ast.Constant:
+                if type(l) == ast.Constant and type(r) == ast.Constant:
+                    match op:
+                        case ast.Add():
                             return ast.Constant(value=(l.value + r.value))
-                        raise RuntimeError(f'non-const Add result not supported')
-                    case ast.Sub():
-                        if type(l) == ast.Constant and type(r) == ast.Constant:
+                        case ast.Sub():
                             return ast.Constant(value=(l.value - r.value))
-                        raise RuntimeError(f'non-const Sub result not supported')
-                    case _:
-                        raise RuntimeError(f'unsupport binop {op}')
+                        case _:
+                            raise RuntimeError(f'unsupport binop {op}')
+                return self.gen_binop(l, r, op)
             case ast.UnaryOp(op, operand):
                 operand = self.compile_expr(operand)
                 match op:
@@ -1465,7 +1498,7 @@ class Program(Config):
         for b in tree.body:
             match b:
                 case ast.FunctionDef(name,_,_,_):
-                    self.symbols[name] = Symbol(name, 0, b'.text', len(self.codebuf))
+                    self.symbols[name] = Symbol(name, 0, RegType.ptr, b'.text', len(self.codebuf))
                     # XYZ handle arguments
                     self.compile_body(b.body)
                 # No need for further checks for valid values, it is done in the first loop
@@ -1479,7 +1512,7 @@ def main(fname):
 def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
-    status = -1 + 1 - 0
+    status = status - 1
     exit(status)
 status:int32 = 1
 '''
