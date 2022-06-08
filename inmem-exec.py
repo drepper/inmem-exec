@@ -353,6 +353,26 @@ class i386_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
+    @classmethod
+    def gen_binop(cls, resreg, rreg, op):
+        if resreg.is_int:
+            assert resreg.is_int
+            assert rreg.is_int
+            match op:
+                # XYZ always 64-bit operation
+                case ast.Add():
+                    res = b'\x01'
+                case ast.Sub():
+                    res = b'\x29'
+                case _:
+                    raise RuntimeError(f'unsupported binop {op}')
+            res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
+            return res
+        else:
+            assert not resreg.is_int
+            assert not rreg.is_int
+            raise RuntimeError('fp binop not yet implemented')
+
 
 class rv32_encoding(RegAlloc):
     nbits = 32           # processor bits
