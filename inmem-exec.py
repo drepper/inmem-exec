@@ -442,6 +442,25 @@ class rv32_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
+    @classmethod
+    def gen_binop(cls, resreg, rreg, op):
+        if resreg.is_int:
+            assert resreg.is_int
+            assert rreg.is_int
+            match op:
+                # XYZ always 64-bit operation
+                case ast.Add():
+                    word = 0b0110011
+                case ast.Sub():
+                    word = (0b0100000 << 25) | 0b0110011
+                case _:
+                    raise RuntimeError(f'unsupported binop {op}')
+            return (word | (rreg.n << 20) | (resreg.n << 15) | (resreg.n << 7)).to_bytes(4, 'little')
+        else:
+            assert not resreg.is_int
+            assert not rreg.is_int
+            raise RuntimeError('fp binop not yet implemented')
+
 
 class rv64_encoding(RegAlloc):
     nbits = 64           # processor bits
@@ -510,6 +529,25 @@ class rv64_encoding(RegAlloc):
             return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo2) ]
         else:
             raise RuntimeError('fp regs not yet handled')
+
+    @classmethod
+    def gen_binop(cls, resreg, rreg, op):
+        if resreg.is_int:
+            assert resreg.is_int
+            assert rreg.is_int
+            match op:
+                # XYZ always 64-bit operation
+                case ast.Add():
+                    word = 0b0110011
+                case ast.Sub():
+                    word = (0b0100000 << 25) | 0b0110011
+                case _:
+                    raise RuntimeError(f'unsupported binop {op}')
+            return (word | (rreg.n << 20) | (resreg.n << 15) | (resreg.n << 7)).to_bytes(4, 'little')
+        else:
+            assert not resreg.is_int
+            assert not rreg.is_int
+            raise RuntimeError('fp binop not yet implemented')
 
 
 class arm_encoding(RegAlloc):
