@@ -1131,6 +1131,8 @@ class Config(object):
 
         if hasattr(os, 'memfd_create'):
             fd = os.memfd_create(fname, os.MFD_CLOEXEC)
+        elif hasattr(os, 'O_TMPFILE'):
+            fd = os.open('.', os.O_RDWR|os.O_CLOEXEC|os.O_TMPFILE, 0o777)
         else:
             fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
 
@@ -1151,7 +1153,8 @@ class Config(object):
         if os.execve in os.supports_fd:
             try:
                 os.execve(self.e.fd, [ self.fname ] + args, os.environ)
-            except OSError:
+            except OSError as e:
+                print(f'while executing: {e.args[1]}')
                 exit(99)
         raise RuntimeError(f'platform {platform.system()} does not support execve on file descriptor')
 
