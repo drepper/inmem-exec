@@ -1126,12 +1126,12 @@ class Config(object):
         self.arch_os_traits = Config.determine_config(system, processor)
         self.loadaddr = self.arch_os_traits.get_loadaddr() if hasattr(self.arch_os_traits, 'get_loadaddr') else 0x40000
 
-    def create_elf(self, fname):
+    def create_elf(self, fname, named=False):
         self.fname = fname
 
-        if hasattr(os, 'memfd_create'):
+        if not named and hasattr(os, 'memfd_create'):
             fd = os.memfd_create(fname, os.MFD_CLOEXEC)
-        elif hasattr(os, 'O_TMPFILE'):
+        elif not named and hasattr(os, 'O_TMPFILE'):
             fd = os.open('.', os.O_RDWR|os.O_CLOEXEC|os.O_TMPFILE, 0o777)
         else:
             fd = os.open(fname, os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_CLOEXEC, 0o777)
@@ -1250,8 +1250,8 @@ class Program(Config):
     def get_endian_str(self):
         return 'little' if self.arch_os_traits.get_endian() == elfdef.ELFDATA2LSB else 'big'
 
-    def elfgen(self, fname):
-        e = self.create_elf(fname)
+    def elfgen(self, fname, named=False):
+        e = self.create_elf(fname, named)
 
         @enum.unique
         class phdrs(enum.IntEnum):
@@ -1436,8 +1436,8 @@ class Program(Config):
         return self
 
 
-def main(fname, args):
-    """Create and run binary.  Use FNAME as the file name and the optional list ARGS as arguments."""
+def main(fname):
+    """Create and run binary.  Use FNAME as the file name."""
     source = r'''
 def main():
     write(1, 'Hello World\n', 12)
@@ -1447,18 +1447,16 @@ def main():
 status:int32 = 1
 '''
 
-    system = None
-    processor = None
-    if args:
-        processor = args[0]
-        args = args[1:]
-    if args:
-        system = processor
-        processor = args[0]
-        args = args[1:]
+    import argparse
+    parser = argparse.ArgumentParser(description='in-memory execution JIT')
+    parser.add_argument('--named', action='store_true')
+    parser.add_argument('-p', '--processor')
+    parser.add_argument('-s', '--system')
+    parser.add_argument('remaining', nargs='*')
+    parsed = parser.parse_args()
 
-    Program(system = system, processor = processor).compile(source).elfgen(fname).execute(args)
+    Program(parsed.system, parsed.processor).compile(source).elfgen(fname, parsed.named).execute(parsed.remaining)
 
 
-main(b'test', sys.argv[1:])
+main(b'test')
 exit(42)
