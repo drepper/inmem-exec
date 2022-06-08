@@ -59,10 +59,11 @@ class RelType(enum.Enum):
     abs4 = 1
     rvhi = 2
     rvlo = 3
-    armmovwabs = 4
-    armmovtabs = 5
-    aarch64lo16abs = 6
-    aarch64hi16abs = 7
+    rvlo2 = 4
+    armmovwabs = 5
+    armmovtabs = 6
+    aarch64lo16abs = 7
+    aarch64hi16abs = 8
 
 
 @dataclass
@@ -92,9 +93,6 @@ class RegMask(object):
         else:
             raise RuntimeError('invalid constructor for RegMask')
 
-    def clear(self):
-        self.a = [ False ] * self.n
-
     def __setitem__(self, key, val):
         if type(key) == slice:
             r = range(key.start if key.start else 0, key.stop if key.stop else len(self.a), key.step if key.step else 1)
@@ -111,11 +109,43 @@ class RegMask(object):
         return self.a[key]
 
 
+class RegAlloc(object):
+    def __init__(self, first_int, n_int_regs, first_fp, n_fp_regs):
+        n_regs = self.n_int_regs + self.n_fp_regs
+        self.int_regs_mask = RegMask(n=n_regs)
+        self.int_regs_mask[first_int:n_int_regs] = True
+        self.fp_regs_mask = RegMask(n=n_regs)
+        self.fp_regs_mask[n_int_regs+first_fp:] = True
+        self.cur_used = RegMask(n=n_regs)
+
+    def clear_used(self):
+        self.cur_used[:] = False
+
+    def get_unused_reg(self, regtype):
+        match regtype:
+            case RegType.int32 | RegType.int64 | RegType.ptr:
+                mask = self.int_regs_mask
+            case RegType.fp:
+                mask = self.fp_regs_mask
+            case _:
+                raise RuntimeError(f'invalid register type {regtype}')
+        for i,u in enumerate(self.cur_used):
+            if not u and mask[i]:
+                self.cur_used[i] = True
+                return Register(regtype, i if i < self.n_int_regs else (i - self.n_int_regs))
+        raise RuntimeError('too many registers used')
+
+    def release_reg(self, reg):
+        self.cur_used[reg.n] = False
+
+
 class Register(object):
     def __init__(self, regtype: RegType, n: int):
         assert type(n) == int
         self.is_int = regtype == RegType.int32 or regtype == RegType.int64 or regtype == RegType.ptr
         self.n = n
+    def __str__(self):
+        return f'is_int={self.is_int}, n={self.n}'
 
 
 class elfdef(object):
@@ -151,7 +181,7 @@ class elfdef(object):
     PF_X = 1
 
 
-class x86_64_encoding:
+class x86_64_encoding(RegAlloc):
     nbits = 64           # processor bits
     elf_machine = elfdef.EM_X86_64
 
@@ -174,6 +204,9 @@ class x86_64_encoding:
     r13 = 0b1101
     r14 = 0b1110
     r15 = 0b1111
+
+    def __init__(self):
+        super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -233,26 +266,13 @@ class x86_64_encoding:
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def get_n_registers(cls):
-        return cls.n_int_regs + cls.n_fp_regs
 
-    @classmethod
-    def get_int_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[:cls.n_int_regs] = True
-        return res
-
-    @classmethod
-    def get_fp_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[cls.n_int_regs:] = True
-        return res
-
-
-class i386_encoding:
+class i386_encoding(RegAlloc):
     nbits = 32           # processor bits
     elf_machine = elfdef.EM_386
+
+    n_int_regs = 8
+    n_fp_regs = 8
 
     rAX = 0b000
     rCX = 0b001
@@ -263,8 +283,8 @@ class i386_encoding:
     rSI = 0b110
     rDI = 0b111
 
-    n_int_regs = 8
-    n_fp_regs = 8
+    def __init__(self):
+        super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -311,87 +331,13 @@ class i386_encoding:
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def get_n_registers(cls):
-        return cls.n_int_regs + cls.n_fp_regs
 
-    @classmethod
-    def get_int_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[:cls.n_int_regs] = True
-        return res
-
-    @classmethod
-    def get_fp_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[cls.n_int_regs:] = True
-        return res
-
-
-class rv32_encoding:
+class rv32_encoding(RegAlloc):
     nbits = 32           # processor bits
     elf_machine = elfdef.EM_RISCV
 
-    rA0 = 0b01010
-    rA1 = 0b01011
-    rA2 = 0b01100
-    rA3 = 0b01101
-    rA4 = 0b01110
-    rA5 = 0b01111
-    rA6 = 0b10000
-    rA7 = 0b10001
-
     n_int_regs = 32
     n_fp_regs = 32
-
-    @staticmethod
-    def gen_loadimm(reg, val, width = 0, signed = False):
-        if val >= -2048 and val < 2048:
-            word = ((val & 0xfff) << 20) | (reg << 7) | 0b0010011
-            res = word.to_bytes(4, 'little')
-        else:
-            word1 = (val & 0xfffff000) | (reg << 7) | 0b0110111
-            word2 = ((val & 0xfff) << 20) | (reg << 15) | (reg << 7) | 0b0010011
-            res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
-        return res
-
-    @staticmethod
-    def gen_loadmem(reg, width, signed = False):
-        word1 = (reg << 7) | 0b0110111
-        res1 = word1.to_bytes(4, 'little')
-        logwidth = math.frexp(width)[1] - 1
-        word2 = (reg << 15) | ((logwidth | (0 if signed or width == 4 else 0b100)) << 12) | (reg << 7) | 0b0000011
-        res2 = word2.to_bytes(4, 'little')
-        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
-
-    @staticmethod
-    def gen_loadref(reg, offset):
-        word1 = (reg << 7) | 0b0110111
-        res1 = word1.to_bytes(4, 'little')
-        word2 = (reg << 15) | (reg << 7) | 0b0010011
-        res2 = word2.to_bytes(4, 'little')
-        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
-
-    @classmethod
-    def get_n_registers(cls):
-        return cls.n_int_regs + cls.n_fp_regs
-
-    @classmethod
-    def get_int_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[:cls.n_int_regs] = True
-        return res
-
-    @classmethod
-    def get_fp_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[cls.n_int_regs:] = True
-        return res
-
-
-class rv64_encoding:
-    nbits = 64           # processor bits
-    elf_machine = elfdef.EM_RISCV
 
     rA0 = 0b01010
     rA1 = 0b01011
@@ -402,59 +348,135 @@ class rv64_encoding:
     rA6 = 0b10000
     rA7 = 0b10001
 
-    n_int_regs = 32
-    n_fp_regs = 32
+    def __init__(self):
+        super().__init__(5, self.n_int_regs, 1, self.n_fp_regs)
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
-        if val >= -2048 and val < 2048:
-            word = ((val & 0xfff) << 20) | (reg << 7) | 0b0010011
-            res = word.to_bytes(4, 'little')
+        if reg.is_int:
+            if val >= -2048 and val < 2048:
+                word = ((val & 0xfff) << 20) | (reg.n << 7) | 0b0010011
+                res = word.to_bytes(4, 'little')
+            else:
+                word1 = (val & 0xfffff000) | (reg.n << 7) | 0b0110111
+                word2 = ((val & 0xfff) << 20) | (reg.n << 15) | (reg.n << 7) | 0b0010011
+                res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
+            return res
         else:
-            word1 = (val & 0xfffff000) | (reg << 7) | 0b0110111
-            word2 = ((val & 0xfff) << 20) | (reg << 15) | (reg << 7) | 0b0010011
-            res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
-        return res
+            raise RuntimeError('fp loadimm not yet handled')
 
     @staticmethod
     def gen_loadmem(reg, width, signed = False):
-        word1 = (reg << 7) | 0b0110111
-        res1 = word1.to_bytes(4, 'little')
-        logwidth = math.frexp(width)[1] - 1
-        word2 = (reg << 15) | ((logwidth | (0 if signed or width == 8 else 0b100)) << 12) | (reg << 7) | 0b0000011
-        res2 = word2.to_bytes(4, 'little')
-        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+        if reg.is_int:
+            word1 = (reg.n << 7) | 0b0110111
+            res1 = word1.to_bytes(4, 'little')
+            logwidth = math.frexp(width)[1] - 1
+            word2 = (reg.n << 15) | ((logwidth | (0 if signed or width == 4 else 0b100)) << 12) | (reg.n << 7) | 0b0000011
+            res2 = word2.to_bytes(4, 'little')
+            return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
     @staticmethod
     def gen_loadref(reg, offset):
         # We always assume a small memory model, references are 4 bytes
-        word1 = (reg << 7) | 0b0110111
+        assert reg.is_int
+        word1 = (reg.n << 7) | 0b0110111
         res1 = word1.to_bytes(4, 'little')
-        word2 = (reg << 15) | (reg << 7) | 0b0010011
+        word2 = (reg.n << 15) | (reg.n << 7) | 0b0010011
         res2 = word2.to_bytes(4, 'little')
         return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
 
-    @classmethod
-    def get_n_registers(cls):
-        return cls.n_int_regs + cls.n_fp_regs
-
-    @classmethod
-    def get_int_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[:cls.n_int_regs] = True
-        return res
-
-    @classmethod
-    def get_fp_reg_mask(cls):
-        res = RegMask(n = cls.get_n_registers())
-        res[cls.n_int_regs:] = True
-        return res
+    def gen_savemem(self, reg, width):
+        if reg.is_int:
+            addrreg = self.get_unused_reg(RegType.ptr)
+            word1 = (addrreg.n << 7) | 0b0110111
+            res1 = word1.to_bytes(4, 'little')
+            logwidth = math.frexp(width)[1] - 1
+            word2 = (reg.n << 20) | (addrreg.n << 15) | (logwidth << 12) | 0b0100011
+            res2 = word2.to_bytes(4, 'little')
+            self.release_reg(addrreg)
+            return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo2) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
 
 
-class arm_encoding:
+class rv64_encoding(RegAlloc):
+    nbits = 64           # processor bits
+    elf_machine = elfdef.EM_RISCV
+
+    n_int_regs = 32
+    n_fp_regs = 32
+
+    rA0 = 0b01010
+    rA1 = 0b01011
+    rA2 = 0b01100
+    rA3 = 0b01101
+    rA4 = 0b01110
+    rA5 = 0b01111
+    rA6 = 0b10000
+    rA7 = 0b10001
+
+    def __init__(self):
+        super().__init__(5, self.n_int_regs, 1, self.n_fp_regs)
+
+    @staticmethod
+    def gen_loadimm(reg, val, width = 0, signed = False):
+        if reg.is_int:
+            if val >= -2048 and val < 2048:
+                word = ((val & 0xfff) << 20) | (reg.n << 7) | 0b0010011
+                res = word.to_bytes(4, 'little')
+            else:
+                word1 = (val & 0xfffff000) | (reg.n << 7) | 0b0110111
+                word2 = ((val & 0xfff) << 20) | (reg.n << 15) | (reg.n << 7) | 0b0010011
+                res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
+            return res
+        else:
+            raise RuntimeError('fp loadimm not yet handled')
+
+    @staticmethod
+    def gen_loadmem(reg, width, signed = False):
+        if reg.is_int:
+            word1 = (reg.n << 7) | 0b0110111
+            res1 = word1.to_bytes(4, 'little')
+            logwidth = math.frexp(width)[1] - 1
+            word2 = (reg.n << 15) | ((logwidth | (0 if signed or width == 8 else 0b100)) << 12) | (reg.n << 7) | 0b0000011
+            res2 = word2.to_bytes(4, 'little')
+            return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
+
+    @staticmethod
+    def gen_loadref(reg, offset):
+        # We always assume a small memory model, references are 4 bytes
+        assert reg.is_int
+        word1 = (reg.n << 7) | 0b0110111
+        res1 = word1.to_bytes(4, 'little')
+        word2 = (reg.n << 15) | (reg.n << 7) | 0b0010011
+        res2 = word2.to_bytes(4, 'little')
+        return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
+
+    def gen_savemem(self, reg, width):
+        if reg.is_int:
+            addrreg = self.get_unused_reg(RegType.ptr)
+            word1 = (addrreg.n << 7) | 0b0110111
+            res1 = word1.to_bytes(4, 'little')
+            logwidth = math.frexp(width)[1] - 1
+            word2 = (reg.n << 20) | (addrreg.n << 15) | (logwidth << 12) | 0b0100011
+            res2 = word2.to_bytes(4, 'little')
+            self.release_reg(addrreg)
+            return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo2) ]
+        else:
+            raise RuntimeError('fp regs not yet handled')
+
+
+class arm_encoding(RegAlloc):
     nbits = 32           # processor bits
     elf_machine = elfdef.EM_ARM
     endian = 'little'
+
+    n_int_regs = 16
+    n_fp_regs = 16
 
     r0 = 0b0000
     r1 = 0b0001
@@ -465,8 +487,8 @@ class arm_encoding:
     r6 = 0b0110
     r7 = 0b0111
 
-    n_int_regs = 16
-    n_fp_regs = 16
+    def __init__(self):
+        super().__init__(self.n_int_regs, self.n_fp_regs)
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
@@ -515,10 +537,13 @@ class arm_encoding:
         return res
 
 
-class aarch64_encoding:
+class aarch64_encoding(RegAlloc):
     nbits = 64           # processor bits
     elf_machine = elfdef.EM_AARCH64
     endian = 'little'
+
+    n_int_regs = 16
+    n_fp_regs = 16
 
     x0 = 0b00000
     x1 = 0b00001
@@ -530,8 +555,8 @@ class aarch64_encoding:
     x7 = 0b00111
     x8 = 0b01000
 
-    n_int_regs = 16
-    n_fp_regs = 16
+    def __init__(self):
+        super().__init__(self.n_int_regs, self.n_fp_regs)
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
@@ -661,11 +686,11 @@ class linux_rv32_traits(rv32_encoding, linux_traits):
     ]
     @classmethod
     def get_syscall_arg_reg(cls, nr):
-        return cls.syscall_arg_regs[nr]
+        return Register(RegType.int32, cls.syscall_arg_regs[nr])
 
     @classmethod
     def gen_syscall(cls, nr):
-        res = cls.gen_loadimm(cls.rA7, nr)
+        res = cls.gen_loadimm(Register(RegType.int32, cls.rA7), nr)
         res += b'\x73\x00\x00\x00'       # ecall
         return res
 
@@ -692,7 +717,7 @@ class linux_rv64_traits(rv64_encoding, linux_traits):
 
     @classmethod
     def gen_syscall(cls, nr):
-        res = cls.gen_loadimm(cls.rA7, nr)
+        res = cls.gen_loadimm(Register(RegType.int64, cls.rA7), nr)
         res += b'\x73\x00\x00\x00'       # ecall
         return res
 
@@ -1064,6 +1089,9 @@ class elf(object):
                 case RelType.rvlo:
                     assert off + 4 <= refdata.contents.size
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfff) << 20)).to_bytes(4, 'little') + buf[off+4:]
+                case RelType.rvlo2:
+                    assert off + 4 <= refdata.contents.size
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfe0) << 20) + ((defval & 0x1f) << 7)).to_bytes(4, 'little') + buf[off+4:]
                 case RelType.armmovtabs:
                     assert off + 4 <= refdata.contents.size
                     immhi = ((defval >> 12) & 0xf0000) | ((defval >> 16) & 0xfff)
@@ -1166,7 +1194,7 @@ class Config(object):
             archs = known_arch_os[system]
             for a in archs:
                 if fnmatch.fnmatch(processor, a):
-                    return archs[a]
+                    return archs[a]()
         except KeyError:
             pass
         raise RuntimeError(f'unsupported OS/architecture {system}/{processor}')
@@ -1184,7 +1212,6 @@ class Program(Config):
         self.codebuf = bytebuf()
         self.rodatabuf = bytebuf()
         self.databuf = bytebuf()
-        self.reg_used = RegMask(n = self.arch_os_traits.get_n_registers())
 
     def gen_id(self, prefix = ''):
         res = '.L' + prefix + str(self.id)
@@ -1231,7 +1258,6 @@ class Program(Config):
                         self.relocations.append(Relocation(a.name, b'.text', add, rel))
                 return
         reg = self.force_reg(resexpr)
-        self.gen_save_val(self.symbols[target], reg)
         match a:
             case Symbol(_):
                 for code, add, rel in self.arch_os_traits.gen_savemem(reg, self.symbols[a.name].size):
@@ -1241,7 +1267,7 @@ class Program(Config):
                         self.relocations.append(Relocation(a.name, b'.text', add, rel))
             case _:
                 raise RuntimeError(f'invalid store address {a}')
-        self.free_register(reg)
+        self.arch_os_traits.release_reg(reg)
 
 
     def gen_syscall(self, nr, *args):
@@ -1319,24 +1345,7 @@ class Program(Config):
         return self
 
     def clear_reg_use(self):
-        self.reg_used.clear()
-
-    def get_reg_unused(self, regtype):
-        match regtype:
-            case RegType.int32 | RegType.int64 | RegType.ptr:
-                mask = self.arch_os_traits.get_int_reg_mask()
-            case RegType.fp:
-                mask = self.arch_os_traits.get_float_reg_mask()
-            case _:
-                raise RuntimeError(f'invalid register type {regtype}')
-        for i,u in enumerate(self.reg_used):
-            if not u and mask[i]:
-                self.reg_used[i] = True
-                return Register(regtype, i)
-        raise RuntimeError('too many registers used')
-
-    def force_reg(self, reg):
-        self.reg_used[reg.n] = False
+        self.arch_os_traits.clear_used()
 
     def define_variable(self, var, ann, value):
         size = get_type_size(ann)
@@ -1362,7 +1371,7 @@ class Program(Config):
     def force_reg(self, expr):
         match expr:
             case ast.Constant(_):
-                reg = self.get_reg_unused(get_type(expr))
+                reg = self.arch_os_traits.get_unused_reg(get_type(expr))
                 self.gen_load_val(reg, expr)
                 return reg
             case Register(_):
