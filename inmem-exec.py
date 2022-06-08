@@ -359,7 +359,6 @@ class i386_encoding(RegAlloc):
             assert resreg.is_int
             assert rreg.is_int
             match op:
-                # XYZ always 64-bit operation
                 case ast.Add():
                     res = b'\x01'
                 case ast.Sub():
@@ -447,7 +446,6 @@ class rv_encoding(RegAlloc):
             assert resreg.is_int
             assert rreg.is_int
             match op:
-                # XYZ always 64-bit operation
                 case ast.Add():
                     word = 0b0110011
                 case ast.Sub():
@@ -537,6 +535,24 @@ class arm_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
+    @classmethod
+    def gen_binop(cls, resreg, rreg, op):
+        if resreg.is_int:
+            assert resreg.is_int
+            assert rreg.is_int
+            match op:
+                case ast.Add():
+                    word = 0xe0800000
+                case ast.Sub():
+                    word = 0xe0400000
+                case _:
+                    raise RuntimeError(f'unsupported binop {op}')
+            return (word | (resreg.n << 16) | (resreg.n << 12) | rreg.n).to_bytes(4, cls.endian)
+        else:
+            assert not resreg.is_int
+            assert not rreg.is_int
+            raise RuntimeError('fp binop not yet implemented')
+
 
 class aarch64_encoding(RegAlloc):
     nbits = 64           # processor bits
@@ -606,6 +622,24 @@ class aarch64_encoding(RegAlloc):
             return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
         else:
             raise RuntimeError('fp regs not yet handled')
+
+    @classmethod
+    def gen_binop(cls, resreg, rreg, op):
+        if resreg.is_int:
+            assert resreg.is_int
+            assert rreg.is_int
+            match op:
+                case ast.Add():
+                    word = 0x8b000000
+                case ast.Sub():
+                    word = 0xcb000000
+                case _:
+                    raise RuntimeError(f'unsupported binop {op}')
+            return (word | (rreg.n << 16) | (resreg.n << 5) | resreg.n).to_bytes(4, cls.endian)
+        else:
+            assert not resreg.is_int
+            assert not rreg.is_int
+            raise RuntimeError('fp binop not yet implemented')
 
 
 # OS traits
