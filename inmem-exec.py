@@ -149,6 +149,13 @@ class Register(object):
         return f'is_int={self.is_int}, n={self.n}'
 
 
+class Flags(object):
+    __match_args__ = ('op', 'reg')
+    def __init__(self, op, reg):
+        self.op = op
+        self.reg = reg
+
+
 class elfdef(object):
     EV_CURRENT = 1
     ET_EXEC = 2
@@ -267,10 +274,8 @@ class x86_64_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def gen_binop(cls, resreg, rreg, op):
+    def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
-            assert resreg.is_int
             assert rreg.is_int
             res = (0x48 | (1 if resreg.n >= 8 else 0) | (4 if rreg.n >= 8 else 0)).to_bytes(1, 'little')
             match op:
@@ -288,11 +293,45 @@ class x86_64_encoding(RegAlloc):
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
+            self.release_reg(rreg)
             return res
         else:
             assert not resreg.is_int
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
+
+    def gen_compare(self, l, r, op):
+        if l.is_int:
+            assert r.is_int
+            res = (0x48 | (1 if l.n >= 8 else 0) | (4 if r.n >= 8 else 0)).to_bytes(1, 'little')
+            match op:
+                # XYZ always 64-bit operation
+                case ast.Eq():
+                    res += b'\x39'
+                case _:
+                    raise RuntimeError(f'unsupported compare {op}')
+            res += (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
+            self.release_reg(l)
+            self.release_reg(r)
+            return res, None
+        else:
+            assert not l.is_int
+            assert not r.is_int
+            raise RuntimeError('fp compare not yet implemented')
+
+    def gen_store_flag(self, op):
+        reg = self.get_unused_reg(RegType.int64)
+        res = self.gen_loadimm(reg, 0)
+        if reg.n >= 8:
+            res += b'\x41'
+        res += b'\x0f'
+        match op:
+            case ast.Eq():
+                res += b'\x94'
+            case _:
+                raise RuntimeError(f'unsupported comparison {op}')
+        res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
+        return res, reg
 
 
 class i386_encoding(RegAlloc):
@@ -378,11 +417,41 @@ class i386_encoding(RegAlloc):
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
+            self.release_reg(rreg)
             return res
         else:
             assert not resreg.is_int
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
+
+    def gen_compare(self, l, r, op):
+        if l.is_int:
+            assert r.is_int
+            match op:
+                case ast.Eq():
+                    res += b'\x39'
+                case _:
+                    raise RuntimeError(f'unsupported compare {op}')
+            res += (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
+            self.release_reg(l)
+            self.release_reg(r)
+            return res, None
+        else:
+            assert not l.is_int
+            assert not r.is_int
+            raise RuntimeError('fp compare not yet implemented')
+
+    def gen_store_flag(self, op):
+        reg = self.get_unused_reg(RegType.int32)
+        res = self.gen_loadimm(reg, 0)
+        res += b'\x0f'
+        match op:
+            case ast.Eq():
+                res += b'\x94'
+            case _:
+                raise RuntimeError(f'unsupported comparison {op}')
+        res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
+        return res, reg
 
 
 class rv_encoding(RegAlloc):
@@ -470,6 +539,7 @@ class rv_encoding(RegAlloc):
                     word = (0b100 << 12) | 0b0110011
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
+            self.release_reg(rreg)
             return (word | (rreg.n << 20) | (resreg.n << 15) | (resreg.n << 7)).to_bytes(4, 'little')
         else:
             assert not resreg.is_int
@@ -571,6 +641,7 @@ class arm_encoding(RegAlloc):
                     word = 0xe0200000
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
+            self.release_reg(rreg)
             return (word | (resreg.n << 16) | (resreg.n << 12) | rreg.n).to_bytes(4, cls.endian)
         else:
             assert not resreg.is_int
@@ -665,6 +736,7 @@ class aarch64_encoding(RegAlloc):
                     word = 0xca000000
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
+            self.release_reg(rreg)
             return (word | (rreg.n << 16) | (resreg.n << 5) | resreg.n).to_bytes(4, cls.endian)
         else:
             assert not resreg.is_int
@@ -1352,6 +1424,18 @@ class Program(Config):
         self.codebuf += res
         return operand
 
+    def gen_compare(self, l, r, op):
+        l = self.force_reg(l)
+        r = self.force_reg(r)
+        res, reg = self.arch_os_traits.gen_compare(l, r, op)
+        self.codebuf += res
+        return Flags(op, reg)
+
+    def gen_store_flag(self, op):
+        res, reg = self.arch_os_traits.gen_store_flag(op)
+        self.codebuf += res
+        return reg
+
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
 
@@ -1459,6 +1543,10 @@ class Program(Config):
             case Register():
                 # Already in a register
                 return expr
+            case Flags(op, reg):
+                if not reg:
+                    reg = self.gen_store_flag(op)
+                return reg
             case _:
                 raise RuntimeError(f'cannot force {expr} into register')
 
@@ -1486,6 +1574,14 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'unsupported unaryop')
 
+    @staticmethod
+    def fold_compare(l, r, op):
+        match op:
+            case ast.Eq():
+                return ast.Constant(value=(l.value == r.value))
+            case _:
+                raise RuntimeError(f'unsupport compare {op}')
+
     def compile_expr(self, e):
         match e:
             case ast.Constant(value):
@@ -1505,6 +1601,12 @@ class Program(Config):
                 if type(operand) == ast.Constant:
                     return self.fold_unop(operand, op)
                 return self.gen_unop(operand, op)
+            case ast.Compare(l,[op],[r]):
+                if type(l) == ast.Constant and type(r) == ast.Constant:
+                    return self.fold_compare(l, r, op)
+                l = self.compile_expr(l)
+                r = self.compile_expr(r)
+                return self.gen_compare(l, r, op)
             case _:
                 raise RuntimeError('unhandled expression type')
 
@@ -1573,6 +1675,7 @@ def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
     status = status - 1 + ((other | (16 ^ 32)) & 4) + (other ^ 8)
+    other = status == 0
     exit(status)
 status:int32 = 1
 other:int32 = 8
