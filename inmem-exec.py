@@ -1346,6 +1346,11 @@ class Program(Config):
         self.arch_os_traits.release_reg(rreg)
         return resreg
 
+    def gen_unop(self, operand, op):
+        operand = self.force_reg(operand)
+        res = self.arch_os_traits.gen_unop(operand, op)
+        self.codebuf += res
+        return operand
 
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
@@ -1485,13 +1490,13 @@ class Program(Config):
                 return self.gen_binop(l, r, op)
             case ast.UnaryOp(op, operand):
                 operand = self.compile_expr(operand)
-                match op:
-                    case ast.USub():
-                        if type(operand) == ast.Constant:
+                if type(operand) == ast.Constant:
+                    match op:
+                        case ast.USub():
                             return ast.Constant(value=-operand.value)
-                        raise RuntimeError(f'non-const USub result not supported')
-                    case _:
-                        raise RuntimeError(f'unsupported unaryop')
+                        case _:
+                            raise RuntimeError(f'unsupported unaryop')
+                return self.gen_unop(operand, op)
             case _:
                 raise RuntimeError('unhandled expression type')
 
