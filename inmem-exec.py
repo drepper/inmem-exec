@@ -1462,6 +1462,30 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'cannot force {expr} into register')
 
+    @staticmethod
+    def fold_binop(l, r, op):
+        match op:
+            case ast.Add():
+                return ast.Constant(value=(l.value + r.value))
+            case ast.Sub():
+                return ast.Constant(value=(l.value - r.value))
+            case ast.BitAnd():
+                return ast.Constant(value=(l.value & r.value))
+            case ast.BitOr():
+                return ast.Constant(value=(l.value | r.value))
+            case ast.BitXor():
+                return ast.Constant(value=(l.value ^ r.value))
+            case _:
+                raise RuntimeError(f'unsupport binop {op}')
+
+    @staticmethod
+    def fold_unop(operand, op):
+        match op:
+            case ast.USub():
+                return ast.Constant(value=-operand.value)
+            case _:
+                raise RuntimeError(f'unsupported unaryop')
+
     def compile_expr(self, e):
         match e:
             case ast.Constant(value):
@@ -1474,28 +1498,12 @@ class Program(Config):
                 l = self.compile_expr(l)
                 r = self.compile_expr(r)
                 if type(l) == ast.Constant and type(r) == ast.Constant:
-                    match op:
-                        case ast.Add():
-                            return ast.Constant(value=(l.value + r.value))
-                        case ast.Sub():
-                            return ast.Constant(value=(l.value - r.value))
-                        case ast.BitAnd():
-                            return ast.Constant(value=(l.value & r.value))
-                        case ast.BitOr():
-                            return ast.Constant(value=(l.value | r.value))
-                        case ast.BitXor():
-                            return ast.Constant(value=(l.value ^ r.value))
-                        case _:
-                            raise RuntimeError(f'unsupport binop {op}')
+                    return self.fold_binop(l, r, op)
                 return self.gen_binop(l, r, op)
             case ast.UnaryOp(op, operand):
                 operand = self.compile_expr(operand)
                 if type(operand) == ast.Constant:
-                    match op:
-                        case ast.USub():
-                            return ast.Constant(value=-operand.value)
-                        case _:
-                            raise RuntimeError(f'unsupported unaryop')
+                    return self.fold_unop(operand, op)
                 return self.gen_unop(operand, op)
             case _:
                 raise RuntimeError('unhandled expression type')
