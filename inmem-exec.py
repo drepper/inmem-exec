@@ -1474,6 +1474,12 @@ class Program(Config):
                             return ast.Constant(value=(l.value + r.value))
                         case ast.Sub():
                             return ast.Constant(value=(l.value - r.value))
+                        case ast.BitAnd():
+                            return ast.Constant(value=(l.value & r.value))
+                        case ast.BitOr():
+                            return ast.Constant(value=(l.value | r.value))
+                        case ast.BitXor():
+                            return ast.Constant(value=(l.value ^ r.value))
                         case _:
                             raise RuntimeError(f'unsupport binop {op}')
                 return self.gen_binop(l, r, op)
@@ -1553,7 +1559,7 @@ def main(fname):
 def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
-    status = status - 1 + (other & 4)
+    status = status - 1 + ((other | (16 ^ 32)) & 4) + (other ^ 8)
     exit(status)
 status:int32 = 1
 other:int32 = 8
