@@ -279,6 +279,12 @@ class x86_64_encoding(RegAlloc):
                     res += b'\x01'
                 case ast.Sub():
                     res += b'\x29'
+                case ast.BitAnd():
+                    res += b'\x21'
+                case ast.BitOr():
+                    res += b'\x09'
+                case ast.BitXor():
+                    res += b'\x31'
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
@@ -363,6 +369,12 @@ class i386_encoding(RegAlloc):
                     res = b'\x01'
                 case ast.Sub():
                     res = b'\x29'
+                case ast.BitAnd():
+                    res = b'\x21'
+                case ast.BitOr():
+                    res = b'\x09'
+                case ast.BitXor():
+                    res = b'\x31'
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
@@ -447,9 +459,15 @@ class rv_encoding(RegAlloc):
             assert rreg.is_int
             match op:
                 case ast.Add():
-                    word = 0b0110011
+                    word = (0b000 << 12) | 0b0110011
                 case ast.Sub():
-                    word = (0b0100000 << 25) | 0b0110011
+                    word = (0b0100000 << 25) | (0b000 << 12) | 0b0110011
+                case ast.BitAnd():
+                    word = (0b111 << 12) | 0b0110011
+                case ast.BitOr():
+                    word = (0b110 << 12) | 0b0110011
+                case ast.BitXor():
+                    word = (0b100 << 12) | 0b0110011
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             return (word | (rreg.n << 20) | (resreg.n << 15) | (resreg.n << 7)).to_bytes(4, 'little')
@@ -545,6 +563,12 @@ class arm_encoding(RegAlloc):
                     word = 0xe0800000
                 case ast.Sub():
                     word = 0xe0400000
+                case ast.BitAnd():
+                    word = 0xe0000000
+                case ast.BitOr():
+                    word = 0xe1800000
+                case ast.BitXor():
+                    word = 0xe0200000
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             return (word | (resreg.n << 16) | (resreg.n << 12) | rreg.n).to_bytes(4, cls.endian)
@@ -633,6 +657,12 @@ class aarch64_encoding(RegAlloc):
                     word = 0x8b000000
                 case ast.Sub():
                     word = 0xcb000000
+                case ast.BitAnd():
+                    word = 0x8a000000
+                case ast.BitOr():
+                    word = 0xaa000000
+                case ast.BitXor():
+                    word = 0xca000000
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             return (word | (rreg.n << 16) | (resreg.n << 5) | resreg.n).to_bytes(4, cls.endian)
@@ -1523,9 +1553,10 @@ def main(fname):
 def main():
     write(1, 'Hello World\n', 12)
     write(1, 'Good Bye\n', 9)
-    status = status - 1
+    status = status - 1 + (other & 4)
     exit(status)
 status:int32 = 1
+other:int32 = 8
 '''
 
     import argparse
