@@ -57,6 +57,7 @@ class RelType(enum.Enum):
     aarch64lo16abs = 7
     aarch64hi16abs = 8
     rel4a = 9
+    rvjal = 10
 
 
 @dataclass
@@ -293,7 +294,7 @@ class x86_64_encoding(RegAlloc):
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
 
-    def gen_compare(self, l, r, op):
+    def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
             assert r.is_int
             res = (0x48 | (1 if l.n >= 8 else 0) | (4 if r.n >= 8 else 0)).to_bytes(1, 'little')
@@ -329,7 +330,7 @@ class x86_64_encoding(RegAlloc):
                 res += b'\x84'
             case _:
                 raise RuntimeError(f'unhandled condjump ({flags.op}, {exp})')
-        return res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)
+        return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
 
 class i386_encoding(RegAlloc):
@@ -422,7 +423,7 @@ class i386_encoding(RegAlloc):
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
 
-    def gen_compare(self, l, r, op):
+    def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
             assert r.is_int
             res = b'\x39' + (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
@@ -455,7 +456,7 @@ class i386_encoding(RegAlloc):
                 res += b'\x84'
             case _:
                 raise RuntimeError(f'unhandled condjump ({flags.op}, {exp})')
-        return res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)
+        return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
 
 class rv_encoding(RegAlloc):
@@ -549,9 +550,11 @@ class rv_encoding(RegAlloc):
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
 
-    def gen_compare(self, l, r, op):
+    def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
             assert r.is_int
+            if condjmpctx:
+                return b'', (l, r)
             match op:
                 case ast.Eq():
                     res = self.gen_binop(l, r, ast.Sub())
@@ -560,10 +563,24 @@ class rv_encoding(RegAlloc):
                     raise RuntimeError(f'unsupported compare {op}')
             return res, l
         else:
-            assert not l.is_int
             assert not r.is_int
             raise RuntimeError('fp compare not yet implemented')
 
+    def gen_condjump(self, curoff, flags, exp, lab):
+        assert type(flags.reg) == tuple and len(flags.reg) == 2
+        if flags.reg[0].is_int:
+            assert flags.reg[1].is_int
+            match (flags.op, exp):
+                case (ast.Eq(), True) | (ast.NotEq(), False):
+                    word1 = ((flags.reg[1].n << 20) | (flags.reg[0].n << 15) | (0b001 << 12) | ((8 >> 1) << 8) | 0b1100011)
+                    word2 = 0b1101111
+                    return [ (word1.to_bytes(4, 'little'), None), (word2.to_bytes(4, 'little'), Relocation(lab, b'.text', curoff + 4, RelType.rvjal)) ]
+                case (ast.Eq(), False) | (ast.NotEq(), True):
+                    word1 = ((flags.reg[1].n << 20) | (flags.reg[0].n << 15) | (0b000 << 12) | ((8 >> 1) << 8) | 0b1100011)
+                    word2 = 0b1101111
+                    return [ (word1.to_bytes(4, 'little'), None), (word2.to_bytes(4, 'little'), Relocation(lab, b'.text', curoff + 4, RelType.rvjal)) ]
+        else:
+            assert not flags.reg[1].is_int
 
 class rv32_encoding(rv_encoding):
     nbits = 32           # processor bits
@@ -1312,6 +1329,11 @@ class elf(object):
                 case RelType.rel4a:
                     assert off + 4 <= refdata.contents.size
                     buf = buf[:off] + (defval - (refshdr.contents.addr + r.offset + 4)).to_bytes(4, enc) + buf[off+4:]
+                case RelType.rvjal:
+                    assert off + 4 <= refdata.contents.size
+                    disp = defval - (refshdr.contents.addr + r.offset)
+                    jaldisp = ((disp & 0x100000) << 11) | ((disp & 0x7fe) << 20) | ((disp & 0x800) << 9) | (disp & 0xff00)
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + jaldisp).to_bytes(4, enc) + buf[off+4:]
                 case _:
                     raise ValueError('invalid relocation type')
             refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
@@ -1490,10 +1512,10 @@ class Program(Config):
         self.codebuf += res
         return operand
 
-    def gen_compare(self, l, r, op):
+    def gen_compare(self, l, r, op, condjmpctx):
         l = self.force_reg(l)
         r = self.force_reg(r)
-        res, reg = self.arch_os_traits.gen_compare(l, r, op)
+        res, reg = self.arch_os_traits.gen_compare(l, r, op, condjmpctx)
         self.codebuf += res
         return Flags(op, reg)
 
@@ -1504,11 +1526,13 @@ class Program(Config):
 
     def gen_condjump(self, test, exp, lab):
         """Jump to LAB if TEST is EXP."""
+        test = self.compile_expr(test, True)
         match test:
             case Flags(_, _):
-                res, rel = self.arch_os_traits.gen_condjump(len(self.codebuf), test, exp, lab)
-                self.codebuf += res
-                self.relocations.append(rel)
+                for res, rel in self.arch_os_traits.gen_condjump(len(self.codebuf), test, exp, lab):
+                    self.codebuf += res
+                    if rel:
+                        self.relocations.append(rel)
             case Register():
                 test = self.gen_compare(test, ast.Constant(value=0), ast.NotEq())
                 self.gen_condjump(test, exp, lab)
@@ -1661,7 +1685,7 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'unsupport compare {op}')
 
-    def compile_expr(self, e):
+    def compile_expr(self, e, condjmpctx=False):
         match e:
             case ast.Constant(value):
                 return e
@@ -1685,7 +1709,7 @@ class Program(Config):
                     return self.fold_compare(l, r, op)
                 l = self.compile_expr(l)
                 r = self.compile_expr(r)
-                return self.gen_compare(l, r, op)
+                return self.gen_compare(l, r, op, condjmpctx)
             case _:
                 raise RuntimeError('unhandled expression type')
 
@@ -1720,7 +1744,6 @@ class Program(Config):
                 case ast.If(test, ifbody, orelse):
                     endlabel = self.gen_id('lab')
                     elselabel = self.gen_id('lab') if orelse else endlabel
-                    test = self.compile_expr(test)
                     self.gen_condjump(test, False, elselabel)
                     self.compile_body(ifbody)
                     if orelse:
