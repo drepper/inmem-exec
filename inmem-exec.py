@@ -668,11 +668,7 @@ class arm_encoding(RegAlloc):
     def gen_compare(self, l, r, op):
         if l.is_int:
             assert r.is_int
-            match op:
-                case ast.Eq():
-                    res = (0xe1500000 | (l.n << 16) | r.n).to_bytes(4, self.endian)
-                case _:
-                    raise RuntimeError(f'unsupported compare {op}')
+            res = (0xe1500000 | (l.n << 16) | r.n).to_bytes(4, self.endian)
             self.release_reg(l)
             self.release_reg(r)
             return res, None
@@ -788,11 +784,7 @@ class aarch64_encoding(RegAlloc):
     def gen_compare(self, l, r, op):
         if l.is_int:
             assert r.is_int
-            match op:
-                case ast.Eq():
-                    res = (0xeb00001f | (r.n << 16) | (l.n << 5)).to_bytes(4, self.endian)
-                case _:
-                    raise RuntimeError(f'unsupported compare {op}')
+            res = (0xeb00001f | (r.n << 16) | (l.n << 5)).to_bytes(4, self.endian)
             self.release_reg(l)
             self.release_reg(r)
             return res, None
