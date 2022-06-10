@@ -773,6 +773,32 @@ class aarch64_encoding(RegAlloc):
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
 
+    def gen_compare(self, l, r, op):
+        if l.is_int:
+            assert r.is_int
+            match op:
+                case ast.Eq():
+                    res = (0xeb00001f | (r.n << 16) | (l.n << 5)).to_bytes(4, self.endian)
+                case _:
+                    raise RuntimeError(f'unsupported compare {op}')
+            self.release_reg(l)
+            self.release_reg(r)
+            return res, None
+        else:
+            assert not l.is_int
+            assert not r.is_int
+            raise RuntimeError('fp compare not yet implemented')
+
+    def gen_store_flag(self, op):
+        reg = self.get_unused_reg(RegType.int32)
+        res = self.gen_loadimm(reg, 0)
+        match op:
+            case ast.Eq():
+                res = (0x9a9f17e0 | reg.n).to_bytes(4, self.endian)
+            case _:
+                raise RuntimeError(f'unsupported comparison {op}')
+        return res, reg
+
 
 # OS traits
 class linux_traits:
