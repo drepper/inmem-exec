@@ -561,18 +561,6 @@ class rv_encoding(RegAlloc):
             assert not r.is_int
             raise RuntimeError('fp compare not yet implemented')
 
-    def gen_store_flag(self, op):
-        reg = self.get_unused_reg(RegType.int32)
-        res = self.gen_loadimm(reg, 0)
-        res += b'\x0f'
-        match op:
-            case ast.Eq():
-                res += b'\x94'
-            case _:
-                raise RuntimeError(f'unsupported comparison {op}')
-        res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
-        return res, reg
-
 
 class rv32_encoding(rv_encoding):
     nbits = 32           # processor bits
@@ -650,8 +638,7 @@ class arm_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def gen_binop(cls, resreg, rreg, op):
+    def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
             assert resreg.is_int
             assert rreg.is_int
@@ -669,11 +656,37 @@ class arm_encoding(RegAlloc):
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             self.release_reg(rreg)
-            return (word | (resreg.n << 16) | (resreg.n << 12) | rreg.n).to_bytes(4, cls.endian)
+            return (word | (resreg.n << 16) | (resreg.n << 12) | rreg.n).to_bytes(4, self.endian)
         else:
             assert not resreg.is_int
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
+
+    def gen_compare(self, l, r, op):
+        if l.is_int:
+            assert r.is_int
+            match op:
+                case ast.Eq():
+                    res = (0xe1500000 | (l.n << 16) | r.n).to_bytes(4, self.endian)
+                case _:
+                    raise RuntimeError(f'unsupported compare {op}')
+            self.release_reg(l)
+            self.release_reg(r)
+            return res, None
+        else:
+            assert not l.is_int
+            assert not r.is_int
+            raise RuntimeError('fp compare not yet implemented')
+
+    def gen_store_flag(self, op):
+        reg = self.get_unused_reg(RegType.int32)
+        res = self.gen_loadimm(reg, 0)
+        match op:
+            case ast.Eq():
+                res += ((0b0000 << 28) | 0x3a00000 | (reg.n << 12) | 1).to_bytes(4, self.endian)
+            case _:
+                raise RuntimeError(f'unsupported comparison {op}')
+        return res, reg
 
 
 class aarch64_encoding(RegAlloc):
@@ -745,8 +758,7 @@ class aarch64_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def gen_binop(cls, resreg, rreg, op):
+    def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
             assert resreg.is_int
             assert rreg.is_int
@@ -764,7 +776,7 @@ class aarch64_encoding(RegAlloc):
                 case _:
                     raise RuntimeError(f'unsupported binop {op}')
             self.release_reg(rreg)
-            return (word | (rreg.n << 16) | (resreg.n << 5) | resreg.n).to_bytes(4, cls.endian)
+            return (word | (rreg.n << 16) | (resreg.n << 5) | resreg.n).to_bytes(4, self.endian)
         else:
             assert not resreg.is_int
             assert not rreg.is_int
@@ -1703,6 +1715,7 @@ def main():
     write(1, 'Good Bye\n', 9)
     status = status - 1 + ((other | (16 ^ 32)) & 4) + (other ^ 8)
     other = status == 0
+    status = status + (1 ^ other)
     exit(status)
 status:int32 = 1
 other:int32 = 8
