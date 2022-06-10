@@ -297,13 +297,7 @@ class x86_64_encoding(RegAlloc):
         if l.is_int:
             assert r.is_int
             res = (0x48 | (1 if l.n >= 8 else 0) | (4 if r.n >= 8 else 0)).to_bytes(1, 'little')
-            match op:
-                # XYZ always 64-bit operation
-                case ast.Eq() | ast.NotEq():
-                    res += b'\x39'
-                case _:
-                    raise RuntimeError(f'unsupported compare {op}')
-            res += (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
+            res += b'\x39' + (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
             self.release_reg(l)
             self.release_reg(r)
             return res, None
@@ -431,12 +425,7 @@ class i386_encoding(RegAlloc):
     def gen_compare(self, l, r, op):
         if l.is_int:
             assert r.is_int
-            match op:
-                case ast.Eq() | ast.NotEq():
-                    res = b'\x39'
-                case _:
-                    raise RuntimeError(f'unsupported compare {op}')
-            res += (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
+            res = b'\x39' + (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
             self.release_reg(l)
             self.release_reg(r)
             return res, None
