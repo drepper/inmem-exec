@@ -56,6 +56,7 @@ class RelType(enum.Enum):
     armmovtabs = 6
     aarch64lo16abs = 7
     aarch64hi16abs = 8
+    rel4a = 9
 
 
 @dataclass
@@ -298,7 +299,7 @@ class x86_64_encoding(RegAlloc):
             res = (0x48 | (1 if l.n >= 8 else 0) | (4 if r.n >= 8 else 0)).to_bytes(1, 'little')
             match op:
                 # XYZ always 64-bit operation
-                case ast.Eq():
+                case ast.Eq() | ast.NotEq():
                     res += b'\x39'
                 case _:
                     raise RuntimeError(f'unsupported compare {op}')
@@ -324,6 +325,17 @@ class x86_64_encoding(RegAlloc):
                 raise RuntimeError(f'unsupported comparison {op}')
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
         return res, reg
+
+    def gen_condjump(self, curoff, flags, exp, lab):
+        res = b'\x0f'
+        match (flags.op, exp):
+            case (ast.Eq(), False) | (ast.NotEq(), True):
+                res += b'\x85'
+            case (ast.Eq(), True) | (ast.NotEq(), False):
+                res += b'\x84'
+            case _:
+                raise RuntimeError(f'unhandled condjump ({flags.op}, {exp})')
+        return res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)
 
 
 class i386_encoding(RegAlloc):
@@ -1267,6 +1279,7 @@ class elf(object):
             defval = symbols[r.symref].addr
             refscnidx = self.sectionidx[r.section]
             refscn = self.getscn(refscnidx)
+            refshdr = self.getshdr(refscn)
             refdata = self.getdata(refscn, None)
 
             off = r.offset
@@ -1274,34 +1287,39 @@ class elf(object):
                 off -= refdata.contents.size
                 refdata = self.getdata(refscn, refdata)
 
+            enc = 'little' if self.getehdr().contents.ident[elfdef.EI_DATA] == elfdef.ELFDATA2LSB else 'big'
+
             buf = ctypes.string_at(refdata.contents.buf, refdata.contents.size)
             match r.reltype:
                 case RelType.abs4:
                     assert off + 4 <= refdata.contents.size
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + defval).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + defval).to_bytes(4, enc) + buf[off+4:]
                 case RelType.rvhi:
                     assert off + 4 <= refdata.contents.size
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + (defval & 0xfffff000)).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + (defval & 0xfffff000)).to_bytes(4, enc) + buf[off+4:]
                 case RelType.rvlo:
                     assert off + 4 <= refdata.contents.size
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfff) << 20)).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + ((defval & 0xfff) << 20)).to_bytes(4, enc) + buf[off+4:]
                 case RelType.rvlo2:
                     assert off + 4 <= refdata.contents.size
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xfe0) << 20) + ((defval & 0x1f) << 7)).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + ((defval & 0xfe0) << 20) + ((defval & 0x1f) << 7)).to_bytes(4, enc) + buf[off+4:]
                 case RelType.armmovtabs:
                     assert off + 4 <= refdata.contents.size
                     immhi = ((defval >> 12) & 0xf0000) | ((defval >> 16) & 0xfff)
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + immhi).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + immhi).to_bytes(4, enc) + buf[off+4:]
                 case RelType.armmovwabs:
                     assert off + 4 <= refdata.contents.size
                     immlo = ((defval << 4) & 0xf0000) | (defval & 0xfff)
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + immlo).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + immlo).to_bytes(4, enc) + buf[off+4:]
                 case RelType.aarch64lo16abs:
                     assert off + 4 <= refdata.contents.size
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval & 0xffff) << 5)).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + ((defval & 0xffff) << 5)).to_bytes(4, enc) + buf[off+4:]
                 case RelType.aarch64hi16abs:
                     assert off + 4 <= refdata.contents.size
-                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], 'little') + ((defval >> 11) & 0x1fffe0)).to_bytes(4, 'little') + buf[off+4:]
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + ((defval >> 11) & 0x1fffe0)).to_bytes(4, enc) + buf[off+4:]
+                case RelType.rel4a:
+                    assert off + 4 <= refdata.contents.size
+                    buf = buf[:off] + (defval - (refshdr.contents.addr + r.offset + 4)).to_bytes(4, enc) + buf[off+4:]
                 case _:
                     raise ValueError('invalid relocation type')
             refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
@@ -1491,6 +1509,19 @@ class Program(Config):
         res, reg = self.arch_os_traits.gen_store_flag(op)
         self.codebuf += res
         return reg
+
+    def gen_condjump(self, test, exp, lab):
+        """Jump to LAB if TEST is EXP."""
+        match test:
+            case Flags(_, _):
+                res, rel = self.arch_os_traits.gen_condjump(len(self.codebuf), test, exp, lab)
+                self.codebuf += res
+                self.relocations.append(rel)
+            case Register():
+                test = self.gen_compare(test, ast.Constant(value=0), ast.NotEq())
+                self.gen_condjump(test, exp, lab)
+            case _:
+                raise RuntimeError(f'unhandled condjump test {test}')
 
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
@@ -1694,6 +1725,17 @@ class Program(Config):
                         raise RuntimeError('assignment to unknown variable {target}')
                     resexpr = self.compile_expr(expr)
                     self.gen_save_val(self.symbols[target], resexpr)
+                case ast.If(test, ifbody, orelse):
+                    endlabel = self.gen_id('lab')
+                    elselabel = self.gen_id('lab') if orelse else endlabel
+                    test = self.compile_expr(test)
+                    self.gen_condjump(test, False, elselabel)
+                    self.compile_body(ifbody)
+                    if orelse:
+                        self.gen_jump(endlabel)
+                        self.symbols[elselabel] = Symbol(id, 0, RegType.ptr, b'.text', len(self.codebuf))
+                        self.compile_body(orelse)
+                    self.symbols[endlabel] = Symbol(id, 0, RegType.ptr, b'.text', len(self.codebuf))
                 case _:
                     raise RuntimeError(f'unhandled function call {e}')
 
@@ -1733,6 +1775,8 @@ def main():
     status = status - 1 + ((other | (16 ^ 32)) & 4) + (other ^ 8)
     other = status == 0
     status = status + (1 ^ other)
+    if other != 1:
+        status = 1
     exit(status)
 status:int32 = 1
 other:int32 = 8
