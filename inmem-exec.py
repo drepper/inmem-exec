@@ -402,8 +402,8 @@ class i386_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def gen_binop(cls, resreg, rreg, op):
+
+    def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
             assert resreg.is_int
             assert rreg.is_int
@@ -432,7 +432,7 @@ class i386_encoding(RegAlloc):
         if l.is_int:
             assert r.is_int
             match op:
-                case ast.Eq():
+                case ast.Eq() | ast.NotEq():
                     res = b'\x39'
                 case _:
                     raise RuntimeError(f'unsupported compare {op}')
@@ -456,6 +456,17 @@ class i386_encoding(RegAlloc):
                 raise RuntimeError(f'unsupported comparison {op}')
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
         return res, reg
+
+    def gen_condjump(self, curoff, flags, exp, lab):
+        res = b'\x0f'
+        match (flags.op, exp):
+            case (ast.Eq(), False) | (ast.NotEq(), True):
+                res += b'\x85'
+            case (ast.Eq(), True) | (ast.NotEq(), False):
+                res += b'\x84'
+            case _:
+                raise RuntimeError(f'unhandled condjump ({flags.op}, {exp})')
+        return res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)
 
 
 class rv_encoding(RegAlloc):
