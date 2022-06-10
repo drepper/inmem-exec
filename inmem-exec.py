@@ -31,16 +31,7 @@ def get_type(value):
             if type(value) == float:
                 return RegType.float64
         case str(s):
-            if s == 'int32':
-                return RegType.int32
-            if s == 'int64':
-                return RegType.int64
-            if s == 'ptr':
-                return RegType.ptr
-            if s == 'float32':
-                return RegType.float32
-            if s == 'float64':
-                return RegType.float64
+            return RegType[s]
     raise RuntimeError(f'invalid value type {type(value)}')
 
 
