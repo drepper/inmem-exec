@@ -429,7 +429,7 @@ class i386_encoding(RegAlloc):
             assert r.is_int
             match op:
                 case ast.Eq():
-                    res += b'\x39'
+                    res = b'\x39'
                 case _:
                     raise RuntimeError(f'unsupported compare {op}')
             res += (0xc0 + (r.n << 3) + l.n).to_bytes(1, 'little')
@@ -521,8 +521,7 @@ class rv_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
-    @classmethod
-    def gen_binop(cls, resreg, rreg, op):
+    def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
             assert resreg.is_int
             assert rreg.is_int
@@ -545,6 +544,33 @@ class rv_encoding(RegAlloc):
             assert not resreg.is_int
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
+
+    def gen_compare(self, l, r, op):
+        if l.is_int:
+            assert r.is_int
+            match op:
+                case ast.Eq():
+                    res = self.gen_binop(l, r, ast.Sub())
+                    res += ((0b000000000001 << 20) | (l.n << 15) | (0b011 << 12) | (l.n << 7) | 0b0010011).to_bytes(4, 'little')
+                case _:
+                    raise RuntimeError(f'unsupported compare {op}')
+            return res, l
+        else:
+            assert not l.is_int
+            assert not r.is_int
+            raise RuntimeError('fp compare not yet implemented')
+
+    def gen_store_flag(self, op):
+        reg = self.get_unused_reg(RegType.int32)
+        res = self.gen_loadimm(reg, 0)
+        res += b'\x0f'
+        match op:
+            case ast.Eq():
+                res += b'\x94'
+            case _:
+                raise RuntimeError(f'unsupported comparison {op}')
+        res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
+        return res, reg
 
 
 class rv32_encoding(rv_encoding):
