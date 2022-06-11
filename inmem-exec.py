@@ -58,6 +58,7 @@ class RelType(enum.Enum):
     aarch64hi16abs = 8
     rel4a = 9
     rvjal = 10
+    armb24 = 11
 
 
 @dataclass
@@ -329,7 +330,7 @@ class x86_64_encoding(RegAlloc):
             case (ast.Eq(), True) | (ast.NotEq(), False):
                 res += b'\x84'
             case _:
-                raise RuntimeError(f'unhandled condjump ({flags.op}, {exp})')
+                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
 
@@ -455,7 +456,7 @@ class i386_encoding(RegAlloc):
             case (ast.Eq(), True) | (ast.NotEq(), False):
                 res += b'\x84'
             case _:
-                raise RuntimeError(f'unhandled condjump ({flags.op}, {exp})')
+                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
 
@@ -579,6 +580,8 @@ class rv_encoding(RegAlloc):
                     word1 = ((flags.reg[1].n << 20) | (flags.reg[0].n << 15) | (0b000 << 12) | ((8 >> 1) << 8) | 0b1100011)
                     word2 = 0b1101111
                     return [ (word1.to_bytes(4, 'little'), None), (word2.to_bytes(4, 'little'), Relocation(lab, b'.text', curoff + 4, RelType.rvjal)) ]
+                case _:
+                    raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         else:
             assert not flags.reg[1].is_int
 
@@ -682,7 +685,7 @@ class arm_encoding(RegAlloc):
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
 
-    def gen_compare(self, l, r, op):
+    def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
             assert r.is_int
             res = (0xe1500000 | (l.n << 16) | r.n).to_bytes(4, self.endian)
@@ -704,6 +707,15 @@ class arm_encoding(RegAlloc):
                 raise RuntimeError(f'unsupported comparison {op}')
         return res, reg
 
+    def gen_condjump(self, curoff, flags, exp, lab):
+        match (flags.op, exp):
+            case (ast.Eq(), True) | (ast.NotEq(), False):
+                cond = 0b0000
+            case (ast.Eq(), False) | (ast.NotEq(), True):
+                cond = 0b0001
+            case _:
+                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+        return [ (((cond << 28) | (0b1010 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
 
 class aarch64_encoding(RegAlloc):
     nbits = 64           # processor bits
@@ -1334,6 +1346,11 @@ class elf(object):
                     disp = defval - (refshdr.contents.addr + r.offset)
                     jaldisp = ((disp & 0x100000) << 11) | ((disp & 0x7fe) << 20) | ((disp & 0x800) << 9) | (disp & 0xff00)
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) + jaldisp).to_bytes(4, enc) + buf[off+4:]
+                case RelType.armb24:
+                    assert off + 4 <= refdata.contents.size
+                    disp = defval - (refshdr.contents.addr + r.offset + 8)
+                    bdisp = (disp >> 2) & 0xffffff
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) | bdisp).to_bytes(4, enc) + buf[off+4:]
                 case _:
                     raise ValueError('invalid relocation type')
             refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
