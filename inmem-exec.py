@@ -334,6 +334,9 @@ class x86_64_encoding(RegAlloc):
                 raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
+    def gen_jump(self, curoff, lab):
+        return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
+
 
 class i386_encoding(RegAlloc):
     nbits = 32           # processor bits
@@ -1573,6 +1576,12 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'unhandled condjump test {test}')
 
+    def gen_jump(self, lab):
+        for res, rel in self.arch_os_traits.gen_jump(len(self.codebuf), lab):
+            self.codebuf += res
+            if rel:
+                self.relocations.append(rel)
+
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
 
@@ -1826,6 +1835,9 @@ def main():
     status = status + (1 ^ other)
     if other != 1:
         status = 1
+    else:
+        # other += 1
+        other = other + 1
     exit(status)
 status:int32 = 1
 other:int32 = 8
