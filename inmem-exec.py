@@ -596,6 +596,9 @@ class rv_encoding(RegAlloc):
         else:
             assert not flags.reg[1].is_int
 
+    def gen_jump(self, curoff, lab):
+        return [ ((0b1101111).to_bytes(4, 'little'), Relocation(lab, b'.text', curoff, RelType.rvjal)) ]
+
 class rv32_encoding(rv_encoding):
     nbits = 32           # processor bits
 
