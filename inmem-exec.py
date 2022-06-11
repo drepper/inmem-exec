@@ -59,6 +59,7 @@ class RelType(enum.Enum):
     rel4a = 9
     rvjal = 10
     armb24 = 11
+    aarch64bc19 = 12
 
 
 @dataclass
@@ -717,6 +718,7 @@ class arm_encoding(RegAlloc):
                 raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (((cond << 28) | (0b1010 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
 
+
 class aarch64_encoding(RegAlloc):
     nbits = 64           # processor bits
     elf_machine = elfdef.EM_AARCH64
@@ -810,7 +812,7 @@ class aarch64_encoding(RegAlloc):
             assert not rreg.is_int
             raise RuntimeError('fp binop not yet implemented')
 
-    def gen_compare(self, l, r, op):
+    def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
             assert r.is_int
             res = (0xeb00001f | (r.n << 16) | (l.n << 5)).to_bytes(4, self.endian)
@@ -831,6 +833,16 @@ class aarch64_encoding(RegAlloc):
             case _:
                 raise RuntimeError(f'unsupported comparison {op}')
         return res, reg
+
+    def gen_condjump(self, curoff, flags, exp, lab):
+        match (flags.op, exp):
+            case (ast.Eq(), True) | (ast.NotEq(), False):
+                cond = 0b0000
+            case (ast.Eq(), False) | (ast.NotEq(), True):
+                cond = 0b0001
+            case _:
+                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+        return [ (((0b01010100 << 24) | cond).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64bc19)) ]
 
 
 # OS traits
@@ -1351,6 +1363,11 @@ class elf(object):
                     disp = defval - (refshdr.contents.addr + r.offset + 8)
                     bdisp = (disp >> 2) & 0xffffff
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) | bdisp).to_bytes(4, enc) + buf[off+4:]
+                case RelType.aarch64bc19:
+                    assert off + 4 <= refdata.contents.size
+                    disp = defval - (refshdr.contents.addr + r.offset)
+                    bdisp = (disp >> 2) & 0x7ffff
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) | (bdisp << 5)).to_bytes(4, enc) + buf[off+4:]
                 case _:
                     raise ValueError('invalid relocation type')
             refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
