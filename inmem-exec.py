@@ -334,7 +334,8 @@ class x86_64_encoding(RegAlloc):
                 raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
-    def gen_jump(self, curoff, lab):
+    @staticmethod
+    def gen_jump(curoff, lab):
         return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
 
 
@@ -462,6 +463,10 @@ class i386_encoding(RegAlloc):
             case _:
                 raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
+
+    @staticmethod
+    def gen_jump(curoff, lab):
+        return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
 
 
 class rv_encoding(RegAlloc):
