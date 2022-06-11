@@ -60,6 +60,7 @@ class RelType(enum.Enum):
     rvjal = 10
     armb24 = 11
     aarch64bc19 = 12
+    aarch64b26 = 13
 
 
 @dataclass
@@ -860,6 +861,8 @@ class aarch64_encoding(RegAlloc):
                 raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (((0b01010100 << 24) | cond).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64bc19)) ]
 
+    def gen_jump(self, curoff, lab):
+        return [ ((0b000101 << 26).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64b26))]
 
 # OS traits
 class linux_traits:
@@ -1384,6 +1387,11 @@ class elf(object):
                     disp = defval - (refshdr.contents.addr + r.offset)
                     bdisp = (disp >> 2) & 0x7ffff
                     buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) | (bdisp << 5)).to_bytes(4, enc) + buf[off+4:]
+                case RelType.aarch64b26:
+                    assert off + 4 <= refdata.contents.size
+                    disp = defval - (refshdr.contents.addr + r.offset)
+                    bdisp = (disp >> 2) & 0x3ffffff
+                    buf = buf[:off] + (int.from_bytes(buf[off:off+4], enc) | bdisp).to_bytes(4, enc) + buf[off+4:]
                 case _:
                     raise ValueError('invalid relocation type')
             refdata.contents.buf = ctypes.cast(ctypes.create_string_buffer(buf, refdata.contents.size), ctypes.POINTER(ctypes.c_byte))
