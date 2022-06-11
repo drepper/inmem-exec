@@ -262,7 +262,7 @@ class x86_64_encoding(RegAlloc):
 
     @classmethod
     def gen_aug_saveimm(cls, op, val, width):
-        if type(val.value) != int or width > 4:
+        if type(val.value) != int or val.value < -2^31 or val.value >= 2^31:
             return None
         match op:
             case ast.Add():
@@ -270,14 +270,16 @@ class x86_64_encoding(RegAlloc):
             case _:
                 return None
         is_imm8 = val.value >= -128 and val.value < 128
-        if width == 4:
+        if width == 8:
+            res = b'\x48\x83' if is_imm8 else b'\x48\x81'
+        elif width == 4:
             res = b'\x83' if is_imm8 else b'\x81'
         elif width == 2:
             res = b'\x66\x83' if is_imm8 else b'\x81'
         else:
             res = b'\x82'
         off = 2 + len(res)
-        res += op + b'\x25\x00\x00\x00\x00' + val.value.to_bytes(1 if is_imm8 else width, 'little')
+        res += op + b'\x25\x00\x00\x00\x00' + val.value.to_bytes(1 if is_imm8 else min(4, width), 'little')
         return [ (res, off, RelType.abs4) ]
 
     @classmethod
@@ -290,6 +292,23 @@ class x86_64_encoding(RegAlloc):
             return [ (res, (4 if rex else 3), RelType.abs4) ]
         else:
             raise RuntimeError('fp regs not yet handled')
+
+    @classmethod
+    def gen_aug_savemem(cls, op, reg, width):
+        match op:
+            case ast.Add():
+                res = b'\x02' if width == 1 else b'\x01'
+            case ast.Sub():
+                res = b'\x2a' if width == 1 else b'\x29'
+            case _:
+                return None
+        if width == 8:
+            res = b'\x48' + res
+        elif width == 2:
+            res = b'\66' + res
+        off = 2 + len(res)
+        res += (0x04 | ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25\x00\x00\x00\x00'
+        return [ (res, off, RelType.abs4) ]
 
     def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
@@ -1585,6 +1604,19 @@ class Program(Config):
                     if rel != RelType.none:
                         self.relocations.append(Relocation(a.name, b'.text', add, rel))
                 return
+        if hasattr(self.arch_os_traits, 'gen_aug_savemem'):
+            oldcode = len(self.codebuf)
+            reg = self.force_reg(value)
+            res = self.arch_os_traits.gen_aug_savemem(op, reg, self.symbols[a.name].size)
+            if res:
+                for code, add, rel in res:
+                    add += len(self.codebuf)
+                    self.codebuf += code
+                    if rel != RelType.none:
+                        self.relocations.append(Relocation(a.name, b'.text', add, rel))
+                return
+            self.release_reg(reg)
+            self.codebuf = self.codebuf[:oldcode]
         reg = self.arch_os_traits.get_unused_reg(a.stype)
         self.gen_load_val(reg, a)
         self.gen_binop(reg, value, op)
@@ -1898,6 +1930,7 @@ def main():
         status = 1
     else:
         other += 1
+        other += status - 1
     exit(status)
 status:int32 = 1
 other:int32 = 8
