@@ -323,7 +323,8 @@ class x86_64_encoding(RegAlloc):
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
         return res, reg
 
-    def gen_condjump(self, curoff, flags, exp, lab):
+    @staticmethod
+    def gen_condjump(curoff, flags, exp, lab):
         res = b'\x0f'
         match (flags.op, exp):
             case (ast.Eq(), False) | (ast.NotEq(), True):
@@ -453,7 +454,8 @@ class i386_encoding(RegAlloc):
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
         return res, reg
 
-    def gen_condjump(self, curoff, flags, exp, lab):
+    @staticmethod
+    def gen_condjump(curoff, flags, exp, lab):
         res = b'\x0f'
         match (flags.op, exp):
             case (ast.Eq(), False) | (ast.NotEq(), True):
