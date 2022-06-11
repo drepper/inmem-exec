@@ -731,6 +731,9 @@ class arm_encoding(RegAlloc):
                 raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
         return [ (((cond << 28) | (0b1010 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
 
+    def gen_jump(self, curoff, lab):
+        return [ (((0b1110 << 28) | (0b1010 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
+
 
 class aarch64_encoding(RegAlloc):
     nbits = 64           # processor bits
