@@ -249,7 +249,7 @@ class x86_64_encoding(RegAlloc):
     @classmethod
     def gen_saveimm(cls, val, width):
         if type(val.value) != int or width > 4:
-            return False
+            return None
         if width == 4:
             res = b'\xc7'
         elif width == 2:
@@ -258,6 +258,26 @@ class x86_64_encoding(RegAlloc):
             res = b'\xc6'
         off = 2 + len(res)
         res += b'\x04\x25\x00\x00\x00\x00' + val.value.to_bytes(width, 'little')
+        return [ (res, off, RelType.abs4) ]
+
+    @classmethod
+    def gen_aug_saveimm(cls, op, val, width):
+        if type(val.value) != int or width > 4:
+            return None
+        match op:
+            case ast.Add():
+                op = b'\x04'
+            case _:
+                return None
+        is_imm8 = val.value >= -128 and val.value < 128
+        if width == 4:
+            res = b'\x83' if is_imm8 else b'\x81'
+        elif width == 2:
+            res = b'\x66\x83' if is_imm8 else b'\x81'
+        else:
+            res = b'\x82'
+        off = 2 + len(res)
+        res += op + b'\x25\x00\x00\x00\x00' + val.value.to_bytes(1 if is_imm8 else width, 'little')
         return [ (res, off, RelType.abs4) ]
 
     @classmethod
@@ -1555,6 +1575,21 @@ class Program(Config):
                 raise RuntimeError(f'invalid store address {a}')
         self.arch_os_traits.release_reg(reg)
 
+    def gen_aug_save_val(self, a, op, value):
+        if type(value) == ast.Constant and hasattr(self.arch_os_traits, 'gen_aug_saveimm'):
+            res = self.arch_os_traits.gen_aug_saveimm(op, value, self.symbols[a.name].size)
+            if res:
+                for code, add, rel in res:
+                    add += len(self.codebuf)
+                    self.codebuf += code
+                    if rel != RelType.none:
+                        self.relocations.append(Relocation(a.name, b'.text', add, rel))
+                return
+        reg = self.arch_os_traits.get_unused_reg(a.stype)
+        self.gen_load_val(reg, a)
+        self.gen_binop(reg, value, op)
+        self.gen_save_val(a, reg)
+
     def gen_binop(self, resreg, rreg, op):
         # XYZ could implement subtraction with constant
         resreg = self.force_reg(resreg)
@@ -1803,8 +1838,13 @@ class Program(Config):
                 case ast.Assign([ ast.Name(target,_) ], expr):
                     if not target in self.symbols:
                         raise RuntimeError('assignment to unknown variable {target}')
-                    resexpr = self.compile_expr(expr)
-                    self.gen_save_val(self.symbols[target], resexpr)
+                    expr = self.compile_expr(expr)
+                    self.gen_save_val(self.symbols[target], expr)
+                case ast.AugAssign(ast.Name(target), op, expr):
+                    if not target in self.symbols:
+                        raise RuntimeError('assignment to unknown variable {target}')
+                    expr = self.compile_expr(expr)
+                    self.gen_aug_save_val(self.symbols[target], op, expr)
                 case ast.If(test, ifbody, orelse):
                     endlabel = self.gen_id('lab')
                     elselabel = self.gen_id('lab') if orelse else endlabel
@@ -1857,8 +1897,7 @@ def main():
     if other != 1:
         status = 1
     else:
-        # other += 1
-        other = other + 1
+        other += 1
     exit(status)
 status:int32 = 1
 other:int32 = 8
