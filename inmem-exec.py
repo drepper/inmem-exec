@@ -437,6 +437,26 @@ class i386_encoding(RegAlloc):
         return [ (res, off, RelType.abs4) ]
 
     @classmethod
+    def gen_aug_saveimm(cls, op, val, width):
+        if type(val.value) != int or val.value < -2^31 or val.value >= 2^31:
+            return None
+        match op:
+            case ast.Add():
+                op = b'\x04'
+            case _:
+                return None
+        is_imm8 = val.value >= -128 and val.value < 128
+        if width == 4:
+            res = b'\x83' if is_imm8 else b'\x81'
+        elif width == 2:
+            res = b'\x66\x83' if is_imm8 else b'\x81'
+        else:
+            res = b'\x82'
+        off = 2 + len(res)
+        res += op + b'\x25\x00\x00\x00\x00' + val.value.to_bytes(1 if is_imm8 else min(4, width), 'little')
+        return [ (res, off, RelType.abs4) ]
+
+    @classmethod
     def gen_savemem(cls, reg, width):
         if reg.is_int:
             res = b'\x89' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
@@ -444,6 +464,20 @@ class i386_encoding(RegAlloc):
         else:
             raise RuntimeError('fp regs not yet handled')
 
+    @classmethod
+    def gen_aug_savemem(cls, op, reg, width):
+        match op:
+            case ast.Add():
+                res = b'\x02' if width == 1 else b'\x01'
+            case ast.Sub():
+                res = b'\x2a' if width == 1 else b'\x29'
+            case _:
+                return None
+        if width == 2:
+            res = b'\66' + res
+        off = 2 + len(res)
+        res += (0x04 | ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25\x00\x00\x00\x00'
+        return [ (res, off, RelType.abs4) ]
 
     def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
