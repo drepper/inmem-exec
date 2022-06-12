@@ -181,9 +181,8 @@ class Register(object):
 
 class StackSlot(object):
     __match_args__ = ('is_int', 'offset')
-    def __init__(self, regtype: RegType, offset: int):
-        assert type(offset) == int
-        self.is_int = regtype == RegType.int32 or regtype == RegType.int64 or regtype == RegType.ptr
+    def __init__(self, is_int: bool, offset: int):
+        self.is_int = is_int
         self.offset = offset
     def __str__(self):
         return f'is_int={self.is_int}, offset={self.offset}'
@@ -476,6 +475,15 @@ class x86_64_encoding(RegAlloc):
     def gen_destroy_stackframe():
         return b'\xc9'
 
+    @staticmethod
+    def gen_frame_store(reg):
+        if reg.is_int:
+            res = b'\x41' if reg.n >= 8 else b''
+            res += (0x50 + (reg.n & 0b111)).to_bytes(1, 'little')
+            return res, 8
+        else:
+            raise RuntimeError(f'store fp on stack frame not supported')
+
 
 class i386_encoding(RegAlloc):
     nbits = 32           # processor bits
@@ -693,6 +701,14 @@ class i386_encoding(RegAlloc):
     @staticmethod
     def gen_destroy_stackframe():
         return b'\xc9'
+
+    @staticmethod
+    def gen_frame_store(reg):
+        if reg.is_int:
+            res = (0x50 + (reg.n & 0b111)).to_bytes(1, 'little')
+            return res, 8
+        else:
+            raise RuntimeError(f'store fp on stack frame not supported')
 
 
 class rv_encoding(RegAlloc):
@@ -1873,6 +1889,13 @@ class Program(Config):
         res = self.arch_os_traits.gen_destroy_stackframe()
         self.codebuf += res
 
+    def gen_frame_store(self, reg):
+        assert type(reg) == Register
+        res, size = self.arch_os_traits.gen_frame_store(reg)
+        self.codebuf += res
+        self.current_fct.frame_size += size
+        return self.current_fct.frame_size
+
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
 
@@ -1961,6 +1984,7 @@ class Program(Config):
             self.name = name
             self.known = dict()
             self.last_fallthrough = True
+            self.frame_size = 0
             n_int = 0
             n_fp = 0
             for a in args:
@@ -2123,6 +2147,11 @@ class Program(Config):
 
     def compile_call(self, name, args):
         is_syscall = self.known_syscall(name)
+
+        for v in self.current_fct.known:
+            if type(self.current_fct.known[v]) == Register:
+                offset = self.gen_frame_store(self.current_fct.known[v])
+                self.current_fct.known[v] = StackSlot(self.current_fct.known[v].is_int, offset)
 
         for idx, a in enumerate(args):
             match a:
