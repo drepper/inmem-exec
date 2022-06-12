@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 @enum.unique
 class RegType(enum.Enum):
+    none = 0
     int8 = 1
     int16 = 2
     int32 = 3
@@ -53,6 +54,9 @@ def get_type_size(t: RegType):
             return 8
         case _:
             raise RuntimeError(f'no size for type {t}')
+
+def type_is_int(t: RegType):
+    return t != RegType.none and t != RegType.float32 and t != RegType.float64
 
 
 @enum.unique
@@ -126,8 +130,14 @@ class RegAlloc(object):
         self.fp_regs_mask[n_int_regs+first_fp:] = True
         self.cur_used = RegMask(n=n_regs)
 
-    def clear_used(self):
+    def clear_used(self, parmregs):
         self.cur_used[:] = False
+        for reg in parmregs:
+            if reg.is_int:
+                self.cur_used[reg.n]  = True
+            else:
+                self.cur_used[self.n_int_regs + reg.n] = True
+
 
     def get_unused_reg(self, regtype):
         match regtype:
@@ -143,17 +153,40 @@ class RegAlloc(object):
                 return Register(regtype, i if i < self.n_int_regs else (i - self.n_int_regs))
         raise RuntimeError('too many registers used')
 
+    def mark_used(self, regtype, n):
+        match regtype:
+            case RegType.int32 | RegType.int64 | RegType.ptr:
+                assert not self.cur_used[n]
+                self.cur_used[n] = True
+            case RegType.fp:
+                n -= len(self.int_regs_mask)
+                assert not self.cur_used[n]
+                self.cur_used[n] = True
+            case _:
+                raise RuntimeError(f'invalid register type {regtype}')
+
     def release_reg(self, reg):
         self.cur_used[reg.n] = False
 
 
 class Register(object):
+    __match_args__ = ('is_int', 'n')
     def __init__(self, regtype: RegType, n: int):
         assert type(n) == int
         self.is_int = regtype == RegType.int32 or regtype == RegType.int64 or regtype == RegType.ptr
         self.n = n
     def __str__(self):
         return f'is_int={self.is_int}, n={self.n}'
+
+
+class StackSlot(object):
+    __match_args__ = ('is_int', 'offset')
+    def __init__(self, regtype: RegType, offset: int):
+        assert type(offset) == int
+        self.is_int = regtype == RegType.int32 or regtype == RegType.int64 or regtype == RegType.ptr
+        self.offset = offset
+    def __str__(self):
+        return f'is_int={self.is_int}, offset={self.offset}'
 
 
 class Flags(object):
@@ -219,9 +252,50 @@ class x86_64_encoding(RegAlloc):
     r13 = 0b1101
     r14 = 0b1110
     r15 = 0b1111
+    rXMM0 = 0b0000
+    rXMM1 = 0b0001
+    rXMM2 = 0b0010
+    rXMM3 = 0b0011
+    rXMM4 = 0b0100
+    rXMM5 = 0b0101
+    rXMM6 = 0b0110
+    rXMM7 = 0b0111
 
     def __init__(self):
         super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
+
+    function_int_arg_regs = [
+        rAX,
+        rDI,
+        rSI,
+        rDX,
+        rCX,
+        r8,
+        r9
+    ]
+    function_fp_arg_regs = [
+        rXMM0,
+        rXMM1,
+        rXMM2,
+        rXMM3,
+        rXMM4,
+        rXMM5,
+        rXMM6,
+        rXMM7
+    ]
+    @classmethod
+    def get_function_int_arg_reg(cls, nr):
+        return Register(RegType.int64, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_function_fp_arg_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+
+    @classmethod
+    def get_int_result_reg(cls, nr):
+        return Register(RegType.int64, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_fp_result_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -359,14 +433,15 @@ class x86_64_encoding(RegAlloc):
             assert not r.is_int
             raise RuntimeError('fp compare not yet implemented')
 
-    def gen_store_flag(self, op):
-        reg = self.get_unused_reg(RegType.int64)
+    def gen_store_flag(self, op, reg):
+        if not reg:
+            reg = self.get_unused_reg(RegType.int64)
         res = self.gen_loadimm(reg, 0)
         if reg.n >= 8:
             res += b'\x41'
         res += b'\x0f'
         match op:
-            case ast.Eq():
+            case ast.Eq() | ast.NotEq():
                 res += b'\x94'
             case _:
                 raise RuntimeError(f'unsupported comparison {op}')
@@ -389,6 +464,18 @@ class x86_64_encoding(RegAlloc):
     def gen_jump(curoff, lab):
         return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
 
+    @staticmethod
+    def gen_return():
+        return b'\xc3'
+
+    @staticmethod
+    def gen_create_stackframe():
+        return b'\x55\x48\x89\xe5'
+
+    @staticmethod
+    def gen_destroy_stackframe():
+        return b'\xc9'
+
 
 class i386_encoding(RegAlloc):
     nbits = 32           # processor bits
@@ -405,9 +492,49 @@ class i386_encoding(RegAlloc):
     rBP = 0b101
     rSI = 0b110
     rDI = 0b111
+    rXMM0 = 0b000
+    rXMM1 = 0b001
+    rXMM2 = 0b010
+    rXMM3 = 0b011
+    rXMM4 = 0b100
+    rXMM5 = 0b101
+    rXMM6 = 0b110
+    rXMM7 = 0b111
 
     def __init__(self):
         super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
+
+    function_int_arg_regs = [
+        rAX,
+        rDI,
+        rSI,
+        rDX,
+        rCX,
+        rBP
+    ]
+    function_fp_arg_regs = [
+        rXMM0,
+        rXMM1,
+        rXMM2,
+        rXMM3,
+        rXMM4,
+        rXMM5,
+        rXMM6,
+        rXMM7
+    ]
+    @classmethod
+    def get_function_int_arg_reg(cls, nr):
+        return Register(RegType.int64, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_function_fp_arg_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+
+    @classmethod
+    def get_int_result_reg(cls, nr):
+        return Register(RegType.int32, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_fp_result_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -526,12 +653,13 @@ class i386_encoding(RegAlloc):
             assert not r.is_int
             raise RuntimeError('fp compare not yet implemented')
 
-    def gen_store_flag(self, op):
-        reg = self.get_unused_reg(RegType.int32)
+    def gen_store_flag(self, op, reg):
+        if not reg:
+            reg = self.get_unused_reg(RegType.int32)
         res = self.gen_loadimm(reg, 0)
         res += b'\x0f'
         match op:
-            case ast.Eq():
+            case ast.Eq() | ast.NotEq():
                 res += b'\x94'
             case _:
                 raise RuntimeError(f'unsupported comparison {op}')
@@ -553,6 +681,18 @@ class i386_encoding(RegAlloc):
     @staticmethod
     def gen_jump(curoff, lab):
         return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
+
+    @staticmethod
+    def gen_return():
+        return b'\xc3'
+
+    @staticmethod
+    def gen_create_stackframe():
+        return b'\x55\x89\xe5'
+
+    @staticmethod
+    def gen_destroy_stackframe():
+        return b'\xc9'
 
 
 class rv_encoding(RegAlloc):
@@ -795,8 +935,9 @@ class arm_encoding(RegAlloc):
             assert not r.is_int
             raise RuntimeError('fp compare not yet implemented')
 
-    def gen_store_flag(self, op):
-        reg = self.get_unused_reg(RegType.int32)
+    def gen_store_flag(self, op, reg):
+        if not reg:
+            reg = self.get_unused_reg(RegType.int32)
         res = self.gen_loadimm(reg, 0)
         match op:
             case ast.Eq():
@@ -924,8 +1065,9 @@ class aarch64_encoding(RegAlloc):
             assert not r.is_int
             raise RuntimeError('fp compare not yet implemented')
 
-    def gen_store_flag(self, op):
-        reg = self.get_unused_reg(RegType.int32)
+    def gen_store_flag(self, op, reg):
+        if not reg:
+            reg = self.get_unused_reg(RegType.int32)
         res = self.gen_loadimm(reg, 0)
         match op:
             case ast.Eq():
@@ -1573,6 +1715,8 @@ class Config(object):
 
 
 class Program(Config):
+    entry = 'main'
+
     def __init__(self, system = None, processor = None):
         super().__init__(system, processor)
         self.id = 0
@@ -1688,8 +1832,8 @@ class Program(Config):
         self.codebuf += res
         return Flags(op, reg)
 
-    def gen_store_flag(self, op):
-        res, reg = self.arch_os_traits.gen_store_flag(op)
+    def gen_store_flag(self, op, reg=None):
+        res, reg = self.arch_os_traits.gen_store_flag(op, reg)
         self.codebuf += res
         return reg
 
@@ -1713,6 +1857,21 @@ class Program(Config):
             self.codebuf += res
             if rel:
                 self.relocations.append(rel)
+        self.current_fct.last_fallthrough = False
+
+    def gen_return(self):
+        res = self.arch_os_traits.gen_destroy_stackframe()
+        res += self.arch_os_traits.gen_return()
+        self.codebuf += res
+        self.current_fct.last_fallthrough = False
+
+    def gen_create_stackframe(self):
+        res = self.arch_os_traits.gen_create_stackframe()
+        self.codebuf += res
+
+    def gen_destroy_stackframe(self):
+        res = self.arch_os_traits.gen_destroy_stackframe()
+        self.codebuf += res
 
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
@@ -1721,6 +1880,9 @@ class Program(Config):
         return 'little' if self.arch_os_traits.get_endian() == elfdef.ELFDATA2LSB else 'big'
 
     def elfgen(self, fname, named=False):
+        if not self.entry in self.symbols:
+            raise RuntimeError(f'no definition of »{self.entry}«')
+
         e = self.create_elf(fname, named)
 
         @enum.unique
@@ -1789,7 +1951,34 @@ class Program(Config):
         return self
 
     def clear_reg_use(self):
-        self.arch_os_traits.clear_used()
+        parmregs = list()
+        for v in self.current_fct.known:
+            parmregs.append(self.current_fct.known[v])
+        self.arch_os_traits.clear_used(parmregs)
+
+    class Function(object):
+        def __init__(self, program, name, args, returntype):
+            self.name = name
+            self.known = dict()
+            self.last_fallthrough = True
+            n_int = 0
+            n_fp = 0
+            for a in args:
+                match a:
+                    case ast.arg(name,ast.Name(ann)):
+                        t = get_type(ann)
+                        is_int = type_is_int(t)
+                        if is_int:
+                            reg = program.arch_os_traits.get_function_int_arg_reg(n_int)
+                            n_int += 1
+                        else:
+                            reg = program.arch_os_traits.get_function_int_arg_reg(n_fp)
+                            n_fp += 1
+                        self.known[name] = reg
+                        program.arch_os_traits.mark_used(t, reg.n)
+                    case _:
+                        raise RuntimeError(f'unsupported argument {a}')
+            self.returntype = returntype
 
     def define_variable(self, var, ann, value, arrsize=None):
         size = get_type_size(ann)
@@ -1830,6 +2019,28 @@ class Program(Config):
         id = self.gen_id('str')
         self.symbols[id] = Symbol(id, len(self.rodatabuf) - offset, RegType.ptr, b'.rodata', offset)
         return id
+
+    def get_result_reg(self, type, n):
+        return self.arch_os_traits.get_int_result_reg(n) if type_is_int(type) else self.arch_os_traits.get_fp_result_reg(n)
+
+    def force_this_reg(self, expr, reg):
+        match expr:
+            case ast.Constant(_):
+                self.gen_load_val(reg, expr)
+            case Register(is_int, n):
+                if reg.is_int != is_int:
+                    raise RuntimeError(f'conversion of return value not implemented')
+                if reg.n != n:
+                    self.arch_os_traits.move_reg(reg, expr)
+            case Flags(op, freg):
+                if not freg:
+                    self.gen_store_flag(op, reg)
+                elif not reg.is_int:
+                    raise RuntimeError(f'conversion of return value not implemented')
+                elif reg.n != freg.n:
+                    self.arch_os_traits.move_reg(reg, freg)
+            case _:
+                raise RuntimeError(f'cannot force {expr} into register {reg}')
 
     def force_reg(self, expr):
         match expr:
@@ -1884,8 +2095,11 @@ class Program(Config):
             case ast.Constant(value):
                 return e
             case ast.Name(id):
-                reg = self.arch_os_traits.get_unused_reg(self.symbols[id].stype)
-                self.gen_load_val(reg, self.symbols[id])
+                if id in self.current_fct.known:
+                    reg = self.current_fct.known[id]
+                else:
+                    reg = self.arch_os_traits.get_unused_reg(self.symbols[id].stype)
+                    self.gen_load_val(reg, self.symbols[id])
                 return reg
             case ast.BinOp(l, op, r):
                 l = self.compile_expr(l)
@@ -1905,31 +2119,35 @@ class Program(Config):
                 r = self.compile_expr(r)
                 return self.gen_compare(l, r, op, condjmpctx)
             case _:
-                raise RuntimeError('unhandled expression type')
+                raise RuntimeError(f'unhandled expression type {e}')
 
-    def compile_body(self, body):
-        for e in body:
+    def compile_call(self, name, args):
+        is_syscall = self.known_syscall(name)
+
+        for idx, a in enumerate(args):
+            match a:
+                case ast.Constant(s) if type(s) == int:
+                    self.gen_load_arg(is_syscall, idx, a)
+                case ast.Constant(s) if type(s) == str:
+                    id = self.store_cstring(s)
+                    self.gen_load_refarg(is_syscall, idx, self.symbols[id])
+                case ast.Name(id,_):
+                    self.gen_load_arg(is_syscall, idx, self.symbols[id])
+                case _:
+                    raise RuntimeError(f'unhandled function parameter type {a}')
+        if is_syscall:
+            self.gen_syscall(name, *args)
+        else:
+            # XYZ generate code
+            print(f'function {name} with {len(args)} arguments')
+
+    def compile_stmts(self, stmts):
+        for e in stmts:
             self.clear_reg_use()
+            self.current_fct.last_fallthrough = True
             match e:
                 case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
-                    is_syscall = self.known_syscall(name)
-
-                    for idx, a in enumerate(args):
-                        match a:
-                            case ast.Constant(s) if type(s) == int:
-                                self.gen_load_arg(is_syscall, idx, a)
-                            case ast.Constant(s) if type(s) == str:
-                                id = self.store_cstring(s)
-                                self.gen_load_refarg(is_syscall, idx, self.symbols[id])
-                            case ast.Name(id,_):
-                                self.gen_load_arg(is_syscall, idx, self.symbols[id])
-                            case _:
-                                raise RuntimeError(f'unhandled function parameter type {a}')
-                    if is_syscall:
-                        self.gen_syscall(name, *args)
-                    else:
-                        # XYZ generate code
-                        print(f'function {name} with {len(args)} arguments')
+                    self.compile_call(name, args)
                 case ast.Assign([ ast.Name(target,_) ], expr):
                     if not target in self.symbols:
                         raise RuntimeError('assignment to unknown variable {target}')
@@ -1944,14 +2162,38 @@ class Program(Config):
                     endlabel = self.gen_id('lab')
                     elselabel = self.gen_id('lab') if orelse else endlabel
                     self.gen_condjump(test, False, elselabel)
-                    self.compile_body(ifbody)
+                    self.compile_stmts(ifbody)
                     if orelse:
                         self.gen_jump(endlabel)
                         self.symbols[elselabel] = Symbol(id, 0, RegType.ptr, b'.text', len(self.codebuf))
-                        self.compile_body(orelse)
+                        self.compile_stmts(orelse)
                     self.symbols[endlabel] = Symbol(id, 0, RegType.ptr, b'.text', len(self.codebuf))
+                case ast.Return(expr):
+                    if self.current_fct.returntype == RegType.none:
+                        if expr:
+                            raise RuntimeError(f'function {self.current_fct.name} defined to have no return type')
+                    else:
+                        if not expr:
+                            raise RuntimeError(f'function {self.current_fct.name} defined to return {self.current_fct.returntype}')
+                        expr = self.compile_expr(expr)
+                        self.force_this_reg(expr, self.get_result_reg(self.current_fct.returntype, 0))
+                    self.gen_return()
                 case _:
                     raise RuntimeError(f'unhandled function call {e}')
+
+    def compile_body(self, name, args, body, returns):
+        match returns:
+            case ast.Name(t):
+                returntype = RegType[t]
+            case None:
+                returntype = RegType.none
+            case _:
+                raise RuntimeError(f'unhandled return type {returns}')
+        self.current_fct = Program.Function(self, name, args, returntype)
+        self.gen_create_stackframe()
+        self.compile_stmts(body)
+        if self.current_fct.last_fallthrough:
+            self.gen_return()
 
     def compile(self, source):
         tree = ast.parse(source)
@@ -1960,24 +2202,23 @@ class Program(Config):
 
         for b in tree.body:
             match b:
-                case ast.FunctionDef(name,_,_,_):
+                case ast.FunctionDef(name,_,_,_,_):
                     pass
                 case ast.Assign([ast.Name(target, _)],value):
                     self.define_variable(target, get_type(value), value)
                 case ast.AnnAssign(ast.Name(target, _),ast.Name(ann,_),value,_):
                     self.define_variable(target, get_type(ann), value)
-                case ast.AnnAssign(ast.Name(target, _),ast.Subscript(ast.Name(ann,_),ast.Constant(arrsize),_),value,_):
-                    # print(f'define {target} as {ann} array with {arrsize} elements initialized with {value if value else 0}')
+                case ast.AnnAssign(ast.Name(target, _),ast.Subscript(ast.Name(ann,_),ast.Constant(arrsize),_),value,_) if type(arrsize) == int:
                     self.define_variable(target, get_type(ann), value, arrsize)
                 case _:
                     raise RuntimeError(f'unhandled AST node {b}')
 
         for b in tree.body:
             match b:
-                case ast.FunctionDef(name,_,_,_):
+                case ast.FunctionDef(name,ast.arguments([],args,kwo,[],[]),body,_,returns) if not kwo:
                     self.symbols[name] = Symbol(name, 0, RegType.ptr, b'.text', len(self.codebuf))
-                    # XYZ handle arguments
-                    self.compile_body(b.body)
+                    self.compile_body(name, args, body, returns)
+                    self.symbols[name].size = len(self.codebuf) - self.symbols[name].addr
                 # No need for further checks for valid values, it is done in the first loop
 
         return self
@@ -1998,6 +2239,8 @@ def main():
         other += 1
         other += status - 1
     exit(status)
+def f(a:int32) -> int32:
+    return a != 0
 status:int32 = 1
 other:int32 = 8
 uninit:int32
