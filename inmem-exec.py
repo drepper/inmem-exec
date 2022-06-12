@@ -14,11 +14,17 @@ from dataclasses import dataclass
 
 @enum.unique
 class RegType(enum.Enum):
-    int32 = 1
-    int64 = 2
-    ptr = 3
-    float32 = 4
-    float64 = 5
+    int8 = 1
+    int16 = 2
+    int32 = 3
+    int64 = 4
+    uint8 = 5
+    uint16 = 6
+    uint32 = 7
+    uint64 = 8
+    ptr = 9
+    float32 = 10
+    float64 = 11
 
 
 def get_type(value):
@@ -37,9 +43,13 @@ def get_type(value):
 
 def get_type_size(t: RegType):
     match t:
-        case RegType.int32 | RegType.float32 | RegType.ptr:
+        case RegType.int8 | RegType.uint8:
+            return 1
+        case RegType.int16 | RegType.uint16:
+            return 2
+        case RegType.int32 | RegType.uint32 | RegType.float32 | RegType.ptr:
             return 4
-        case RegType.int64 | RegType.float64:
+        case RegType.int64 | RegType.uint64 | RegType.float64:
             return 8
         case _:
             raise RuntimeError(f'no size for type {t}')
@@ -1781,19 +1791,35 @@ class Program(Config):
     def clear_reg_use(self):
         self.arch_os_traits.clear_used()
 
-    def define_variable(self, var, ann, value):
+    def define_variable(self, var, ann, value, arrsize=None):
         size = get_type_size(ann)
         addr = len(self.databuf)
         if addr % size != 0:
             npad = size * ((addr + size - 1) // size) - addr
             self.databuf += b'\x00' * npad
             addr += npad
-        self.symbols[var] = Symbol(var, size, ann, b'.data', addr)
-        match value:
-            case ast.Constant(v) if type(v) == int:
-                self.databuf += v.to_bytes(size, self.get_endian_str())
-            case _:
-                raise RuntimeError('invalid variable value')
+        self.symbols[var] = Symbol(var, size * (arrsize if arrsize else 1), ann, b'.data', addr)
+        if arrsize:
+            match value:
+                case ast.List(elts):
+                    for idx in range(arrsize):
+                        match elts[idx % len(elts)]:
+                            case ast.Constant(v) if type(v) == int:
+                                self.databuf += v.to_bytes(size, self.get_endian_str())
+                            case _:
+                                raise RuntimeError('invalid variable value')
+                case None:
+                    self.databuf += b'\x00' * (size * arrsize)
+                case _:
+                    raise RuntimeError('invalid variable value')
+        else:
+            match value:
+                case ast.Constant(v) if type(v) == int:
+                    self.databuf += v.to_bytes(size, self.get_endian_str())
+                case None:
+                    self.databuf += b'\x00' * size
+                case _:
+                    raise RuntimeError('invalid variable value')
 
     def store_cstring(self, s):
         offset = len(self.rodatabuf)
@@ -1937,6 +1963,9 @@ class Program(Config):
                     self.define_variable(target, get_type(value), value)
                 case ast.AnnAssign(ast.Name(target, _),ast.Name(ann,_),value,_):
                     self.define_variable(target, get_type(ann), value)
+                case ast.AnnAssign(ast.Name(target, _),ast.Subscript(ast.Name(ann,_),ast.Constant(arrsize),_),value,_):
+                    # print(f'define {target} as {ann} array with {arrsize} elements initialized with {value if value else 0}')
+                    self.define_variable(target, get_type(ann), value, arrsize)
                 case _:
                     raise RuntimeError(f'unhandled AST node {b}')
 
@@ -1968,6 +1997,8 @@ def main():
     exit(status)
 status:int32 = 1
 other:int32 = 8
+uninit:int32
+arr:int8[100] = [ 1,2,3 ]
 '''
 
     import argparse
