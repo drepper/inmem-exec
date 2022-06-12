@@ -1798,7 +1798,6 @@ class Program(Config):
             npad = size * ((addr + size - 1) // size) - addr
             self.databuf += b'\x00' * npad
             addr += npad
-        self.symbols[var] = Symbol(var, size * (arrsize if arrsize else 1), ann, b'.data', addr)
         if arrsize:
             match value:
                 case ast.List(elts):
@@ -1816,10 +1815,14 @@ class Program(Config):
             match value:
                 case ast.Constant(v) if type(v) == int:
                     self.databuf += v.to_bytes(size, self.get_endian_str())
+                case ast.Constant(v) if size == 1 and type(v) == str:
+                    arrsize = len(v) + 1
+                    self.databuf += bytearray(v, 'UTF-8') + b'\x00'
                 case None:
                     self.databuf += b'\x00' * size
                 case _:
                     raise RuntimeError('invalid variable value')
+        self.symbols[var] = Symbol(var, size * (arrsize if arrsize else 1), ann, b'.data', addr)
 
     def store_cstring(self, s):
         offset = len(self.rodatabuf)
@@ -1999,6 +2002,7 @@ status:int32 = 1
 other:int32 = 8
 uninit:int32
 arr:int8[100] = [ 1,2,3 ]
+s:int8 = 'hello world 2\n'
 '''
 
     import argparse
