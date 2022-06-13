@@ -9,6 +9,7 @@ import resource
 import sys
 import locale
 import ast
+import copy
 from dataclasses import dataclass
 
 
@@ -286,11 +287,11 @@ class x86_64_encoding(RegAlloc):
         return Register(RegType.float64, cls.function_fp_arg_regs[nr])
 
     @classmethod
-    def get_int_result_reg(cls, nr):
-        return Register(RegType.int64, cls.function_int_arg_regs[nr])
-    @classmethod
-    def get_fp_result_reg(cls, nr):
-        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+    def get_function_res_reg(cls, is_int):
+        if is_int:
+            return Register(RegType.int64, cls.function_int_arg_regs[0])
+        else:
+            return Register(RegType.float64, cls.function_fp_arg_regs[0])
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -436,8 +437,10 @@ class x86_64_encoding(RegAlloc):
             res += b'\x41'
         res += b'\x0f'
         match op:
-            case ast.Eq() | ast.NotEq():
+            case ast.Eq():
                 res += b'\x94'
+            case ast.NotEq():
+                res += b'\x95'
             case _:
                 raise RuntimeError(f'unsupported comparison {op}')
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
@@ -458,6 +461,10 @@ class x86_64_encoding(RegAlloc):
     @staticmethod
     def gen_jump(curoff, lab):
         return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
+
+    @staticmethod
+    def gen_call(curoff, lab):
+        return [ (b'\xe8\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
 
     @staticmethod
     def gen_return():
@@ -546,11 +553,11 @@ class i386_encoding(RegAlloc):
         return Register(RegType.float64, cls.function_fp_arg_regs[nr])
 
     @classmethod
-    def get_int_result_reg(cls, nr):
-        return Register(RegType.int32, cls.function_int_arg_regs[nr])
-    @classmethod
-    def get_fp_result_reg(cls, nr):
-        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+    def get_function_res_reg(cls, is_int):
+        if is_int:
+            return Register(RegType.int64, cls.function_int_arg_regs[0])
+        else:
+            return Register(RegType.float64, cls.function_fp_arg_regs[0])
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -675,8 +682,10 @@ class i386_encoding(RegAlloc):
         res = self.gen_loadimm(reg, 0)
         res += b'\x0f'
         match op:
-            case ast.Eq() | ast.NotEq():
+            case ast.Eq():
                 res += b'\x94'
+            case ast.NotEq():
+                res += b'\x95'
             case _:
                 raise RuntimeError(f'unsupported comparison {op}')
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
@@ -697,6 +706,10 @@ class i386_encoding(RegAlloc):
     @staticmethod
     def gen_jump(curoff, lab):
         return [ (b'\xe9\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
+
+    @staticmethod
+    def gen_call(curoff, lab):
+        return [ (b'\xe8\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 1, RelType.rel4a)) ]
 
     @staticmethod
     def gen_return():
@@ -1766,6 +1779,7 @@ class Program(Config):
         super().__init__(system, processor)
         self.id = 0
         self.symbols = dict()
+        self.functions = dict()
         self.relocations = list()
         self.codebuf = bytebuf()
         self.rodatabuf = bytebuf()
@@ -1775,6 +1789,25 @@ class Program(Config):
         res = '.L' + prefix + str(self.id)
         self.id += 1
         return res
+
+    class ArgReg(object):
+        def __init__(self, program, is_syscall):
+            self.program = program
+            self.is_syscall = is_syscall
+            self.n_int = 0
+            self.n_fp = 0
+        def next(self, is_int: bool) -> Register:
+            if self.is_syscall:
+                assert is_int
+                reg = self.program.arch_os_traits.get_syscall_arg_reg(self.n_int)
+                self.n_int += 1
+            elif is_int:
+                reg = self.program.arch_os_traits.get_function_int_arg_reg(self.n_int)
+                self.n_int += 1
+            else:
+                reg = self.program.arch_os_traits.get_function_fp_arg_reg(self.n_fp)
+                self.n_fp += 1
+            return reg
 
     def gen_load_val(self, reg, a):
         match a:
@@ -1907,6 +1940,12 @@ class Program(Config):
         self.codebuf += res
         self.current_fct.last_fallthrough = False
 
+    def gen_call(self, lab):
+        for res, rel in self.arch_os_traits.gen_call(len(self.codebuf), lab):
+            self.codebuf += res
+            if rel:
+                self.relocations.append(rel)
+
     def gen_create_stackframe(self):
         res = self.arch_os_traits.gen_create_stackframe()
         self.codebuf += res
@@ -2013,23 +2052,19 @@ class Program(Config):
     class Function(object):
         def __init__(self, program, name, args, returntype):
             self.name = name
-            self.known = dict()
+            self.paramreg = dict()
+            self.paramname = list()
             self.last_fallthrough = True
             self.frame_size = 0
-            n_int = 0
-            n_fp = 0
+            argreg = Program.ArgReg(program, False)
             for a in args:
                 match a:
-                    case ast.arg(name,ast.Name(ann)):
+                    case ast.arg(pname,ast.Name(ann)):
                         t = get_type(ann)
                         is_int = type_is_int(t)
-                        if is_int:
-                            reg = program.arch_os_traits.get_function_int_arg_reg(n_int)
-                            n_int += 1
-                        else:
-                            reg = program.arch_os_traits.get_function_int_arg_reg(n_fp)
-                            n_fp += 1
-                        self.known[name] = reg
+                        reg = argreg.next(is_int)
+                        self.paramreg[pname] = reg
+                        self.paramname.append(pname)
                         program.arch_os_traits.mark_used(reg)
                     case _:
                         raise RuntimeError(f'unsupported argument {a}')
@@ -2075,8 +2110,8 @@ class Program(Config):
         self.symbols[id] = Symbol(id, len(self.rodatabuf) - offset, RegType.ptr, b'.rodata', offset)
         return id
 
-    def get_result_reg(self, type, n):
-        return self.arch_os_traits.get_int_result_reg(n) if type_is_int(type) else self.arch_os_traits.get_fp_result_reg(n)
+    def get_function_res_reg(self, type):
+        return self.arch_os_traits.get_function_res_reg(type_is_int(type))
 
     def force_this_reg(self, expr, reg):
         match expr:
@@ -2154,7 +2189,6 @@ class Program(Config):
                     if type(self.current_fct.known[id]) == Register:
                         reg = self.current_fct.known[id]
                     else:
-                        print(f'known[id]={self.current_fct.known[id]}')
                         reg = self.arch_os_traits.get_unused_reg(RegType.ptr if self.current_fct.known[id].is_int else RegType.float64)
                         self.gen_frame_load(reg, self.current_fct.known[id].offset)
                 else:
@@ -2178,13 +2212,17 @@ class Program(Config):
                 l = self.compile_expr(l)
                 r = self.compile_expr(r)
                 return self.gen_compare(l, r, op, condjmpctx)
-            case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
-                reg = self.compile_call(name, args)
+            case ast.Call(ast.Name(name,_),args,[]):
+                return self.compile_call(name, args)
             case _:
                 raise RuntimeError(f'unhandled expression type {e}')
 
     def compile_call(self, name, args):
         is_syscall = self.known_syscall(name)
+        if not is_syscall:
+            called = self.functions[name]
+        else:
+            argreg = Program.ArgReg(self, is_syscall)
 
         # XYZ Don't save for syscalls if not necessary
         for v in self.current_fct.known:
@@ -2193,26 +2231,34 @@ class Program(Config):
                 self.current_fct.known[v] = StackSlot(self.current_fct.known[v].is_int, offset)
 
         for idx, a in enumerate(args):
-            reg = self.arch_os_traits.get_syscall_arg_reg(idx) if is_syscall else self.arch_os_traits.get_function_arg_reg(idx)
+            if is_syscall:
+                preg = argreg.next(True)
+            else:
+                pname = called.paramname[idx]
+                preg = called.paramreg[pname]
             match a:
                 case ast.Constant(s) if type(s) == int:
-                    self.gen_load_val(reg, a)
+                    self.gen_load_val(preg, a)
                 case ast.Constant(s) if type(s) == str:
                     id = self.store_cstring(s)
-                    self.gen_load_ref(reg, self.symbols[id])
+                    self.gen_load_ref(preg, self.symbols[id])
                 case ast.Name(id,_):
                     if id in self.current_fct.known:
-                        self.gen_load_val(reg, self.current_fct.known[id])
+                        self.gen_load_val(preg, self.current_fct.known[id])
                     else:
-                        self.gen_load_val(reg, self.symbols[id])
+                        self.gen_load_val(preg, self.symbols[id])
                 case _:
                     raise RuntimeError(f'unhandled function parameter type {a}')
         if is_syscall:
             self.gen_syscall(name, *args)
             resreg = self.arch_os_traits.get_syscall_res_reg()
         else:
-            # XYZ generate code
-            print(f'function {name} with {len(args)} arguments')
+            self.gen_call(name)
+            if called.returntype == RegType.none:
+                resreg = None
+                print(f'function {name} is void')
+            else:
+                resreg = self.arch_os_traits.get_function_res_reg(type_is_int(called.returntype))
 
         # Return register carrying results.
         return resreg
@@ -2252,7 +2298,7 @@ class Program(Config):
                         if not expr:
                             raise RuntimeError(f'function {self.current_fct.name} defined to return {self.current_fct.returntype}')
                         expr = self.compile_expr(expr)
-                        self.force_this_reg(expr, self.get_result_reg(self.current_fct.returntype, 0))
+                        self.force_this_reg(expr, self.get_function_res_reg(self.current_fct.returntype))
                     self.gen_return()
                 case _:
                     raise RuntimeError(f'unhandled function call {e}')
@@ -2265,7 +2311,8 @@ class Program(Config):
                 returntype = RegType.none
             case _:
                 raise RuntimeError(f'unhandled return type {returns}')
-        self.current_fct = Program.Function(self, name, args, returntype)
+        self.current_fct = self.functions[name]
+        self.current_fct.known = copy.deepcopy(self.current_fct.paramreg)
         self.gen_create_stackframe()
         self.compile_stmts(body)
         if self.current_fct.last_fallthrough:
@@ -2278,8 +2325,10 @@ class Program(Config):
 
         for b in tree.body:
             match b:
-                case ast.FunctionDef(name,_,_,_,_):
-                    pass
+                case ast.FunctionDef(name,ast.arguments([],args,kwo,[],[]),_,_,returns):
+                    if name in self.functions:
+                        print(f'duplicate definition of function {name}')
+                    self.functions[name] = Program.Function(self, name, args, get_type(returns.id) if returns else RegType.none)
                 case ast.Assign([ast.Name(target, _)],value):
                     self.define_variable(target, get_type(value), value)
                 case ast.AnnAssign(ast.Name(target, _),ast.Name(ann,_),value,_):
@@ -2314,6 +2363,7 @@ def main():
     else:
         other += 1
         other += status - 1
+    status = f(status)
     exit(status)
 def f(a:int32) -> int32:
     write(1, 'in f\n', 5)
