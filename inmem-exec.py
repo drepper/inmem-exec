@@ -143,7 +143,7 @@ class RegAlloc(object):
         match regtype:
             case RegType.int32 | RegType.int64 | RegType.ptr:
                 mask = self.int_regs_mask
-            case RegType.fp:
+            case RegType.float32 | RegType.float64:
                 mask = self.fp_regs_mask
             case _:
                 raise RuntimeError(f'invalid register type {regtype}')
@@ -153,17 +153,13 @@ class RegAlloc(object):
                 return Register(regtype, i if i < self.n_int_regs else (i - self.n_int_regs))
         raise RuntimeError('too many registers used')
 
-    def mark_used(self, regtype, n):
-        match regtype:
-            case RegType.int32 | RegType.int64 | RegType.ptr:
-                assert not self.cur_used[n]
-                self.cur_used[n] = True
-            case RegType.fp:
-                n -= len(self.int_regs_mask)
-                assert not self.cur_used[n]
-                self.cur_used[n] = True
-            case _:
-                raise RuntimeError(f'invalid register type {regtype}')
+    def mark_used(self, reg):
+        if reg.is_int:
+            assert not self.cur_used[reg.n]
+            self.cur_used[reg.n] = True
+        else:
+            assert not self.cur_used[len(self.int_regs_mask) + reg.n]
+            self.cur_used[len(self.int_regs_mask) + reg.n] = True
 
     def release_reg(self, reg):
         self.cur_used[reg.n] = False
@@ -484,6 +480,18 @@ class x86_64_encoding(RegAlloc):
         else:
             raise RuntimeError(f'store fp on stack frame not supported')
 
+    @staticmethod
+    def gen_frame_load(reg, offset):
+        assert offset > 0
+        if reg.is_int:
+            res = (b'\x48' if reg.n < 8 else b'\x4c') + b'\x8b'
+            if offset <= 128:
+                res += (0x45 + ((reg .n & 0b111) << 3)).to_bytes(1, 'little') + (-offset).to_bytes(1, 'little', signed=True)
+            else:
+                res += (0x85 + ((reg .n & 0b111) << 3)).to_bytes(1, 'little') + (-offset).to_bytes(4, 'little', signed=True)
+        else:
+            raise RuntimeError(f'load fp from frame not supported')
+        return res
 
 class i386_encoding(RegAlloc):
     nbits = 32           # processor bits
@@ -709,6 +717,19 @@ class i386_encoding(RegAlloc):
             return res, 8
         else:
             raise RuntimeError(f'store fp on stack frame not supported')
+
+    @staticmethod
+    def gen_frame_load(reg, offset):
+        assert offset > 0
+        if reg.is_int:
+            res = b'\x8b'
+            if offset <= 128:
+                res += (0x45 + ((reg .n & 0b111) << 3)).to_bytes(1, 'little') + (-offset).to_bytes(1, 'little', signed=True)
+            else:
+                res += (0x85 + ((reg .n & 0b111) << 3)).to_bytes(1, 'little') + (-offset).to_bytes(4, 'little', signed=True)
+        else:
+            raise RuntimeError(f'load fp from frame not supported')
+        return res
 
 
 class rv_encoding(RegAlloc):
@@ -1136,6 +1157,10 @@ class linux_x86_64_traits(x86_64_encoding, linux_traits):
         return Register(RegType.int64, cls.syscall_arg_regs[nr])
 
     @classmethod
+    def get_syscall_res_reg(cls):
+        return Register(RegType.int64, cls.rAX)
+
+    @classmethod
     def gen_syscall(cls, nr):
         res = cls.gen_loadimm(Register(RegType.int64, cls.rAX), nr)
         res += b'\x0f\x05'                          # syscall
@@ -1161,6 +1186,10 @@ class linux_i386_traits(i386_encoding, linux_traits):
     @classmethod
     def get_syscall_arg_reg(cls, nr):
         return Register(RegType.int32, cls.syscall_arg_regs[nr])
+
+    @classmethod
+    def get_syscall_res_reg(cls):
+        return Register(RegType.int64, cls.rAX)
 
     @classmethod
     def gen_syscall(cls, nr):
@@ -1757,6 +1786,8 @@ class Program(Config):
                     self.codebuf += code
                     if rel != RelType.none:
                         self.relocations.append(Relocation(a.name, b'.text', add, rel))
+            case StackSlot(_, offset):
+                self.code += self.arch_os_traits.gen_frame_load(reg, offset)
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
 
@@ -1891,6 +1922,10 @@ class Program(Config):
         self.current_fct.frame_size += size
         return self.current_fct.frame_size
 
+    def gen_frame_load(self, reg, offset):
+        res = self.arch_os_traits.gen_frame_load(reg, offset)
+        self.codebuf += res
+
     def gen_syscall(self, nr, *args):
         self.codebuf += self.arch_os_traits.gen_syscall(getattr(self.arch_os_traits, 'SYS_' + nr))
 
@@ -1971,7 +2006,8 @@ class Program(Config):
     def clear_reg_use(self):
         parmregs = list()
         for v in self.current_fct.known:
-            parmregs.append(self.current_fct.known[v])
+            if type(self.current_fct.known[v]) == Register:
+                parmregs.append(self.current_fct.known[v])
         self.arch_os_traits.clear_used(parmregs)
 
     class Function(object):
@@ -1994,7 +2030,7 @@ class Program(Config):
                             reg = program.arch_os_traits.get_function_int_arg_reg(n_fp)
                             n_fp += 1
                         self.known[name] = reg
-                        program.arch_os_traits.mark_used(t, reg.n)
+                        program.arch_os_traits.mark_used(reg)
                     case _:
                         raise RuntimeError(f'unsupported argument {a}')
             self.returntype = returntype
@@ -2115,7 +2151,12 @@ class Program(Config):
                 return e
             case ast.Name(id):
                 if id in self.current_fct.known:
-                    reg = self.current_fct.known[id]
+                    if type(self.current_fct.known[id]) == Register:
+                        reg = self.current_fct.known[id]
+                    else:
+                        print(f'known[id]={self.current_fct.known[id]}')
+                        reg = self.arch_os_traits.get_unused_reg(RegType.ptr if self.current_fct.known[id].is_int else RegType.float64)
+                        self.gen_frame_load(reg, self.current_fct.known[id].offset)
                 else:
                     reg = self.arch_os_traits.get_unused_reg(self.symbols[id].stype)
                     self.gen_load_val(reg, self.symbols[id])
@@ -2137,6 +2178,8 @@ class Program(Config):
                 l = self.compile_expr(l)
                 r = self.compile_expr(r)
                 return self.gen_compare(l, r, op, condjmpctx)
+            case ast.Expr(ast.Call(ast.Name(name,_),args,[])):
+                reg = self.compile_call(name, args)
             case _:
                 raise RuntimeError(f'unhandled expression type {e}')
 
@@ -2158,14 +2201,21 @@ class Program(Config):
                     id = self.store_cstring(s)
                     self.gen_load_ref(reg, self.symbols[id])
                 case ast.Name(id,_):
-                    self.gen_load_val(reg, self.symbols[id])
+                    if id in self.current_fct.known:
+                        self.gen_load_val(reg, self.current_fct.known[id])
+                    else:
+                        self.gen_load_val(reg, self.symbols[id])
                 case _:
                     raise RuntimeError(f'unhandled function parameter type {a}')
         if is_syscall:
             self.gen_syscall(name, *args)
+            resreg = self.arch_os_traits.get_syscall_res_reg()
         else:
             # XYZ generate code
             print(f'function {name} with {len(args)} arguments')
+
+        # Return register carrying results.
+        return resreg
 
     def compile_stmts(self, stmts):
         for e in stmts:
@@ -2266,6 +2316,7 @@ def main():
         other += status - 1
     exit(status)
 def f(a:int32) -> int32:
+    write(1, 'in f\n', 5)
     return a != 0
 status:int32 = 1
 other:int32 = 8
