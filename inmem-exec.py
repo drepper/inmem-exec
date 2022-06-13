@@ -547,7 +547,7 @@ class i386_encoding(RegAlloc):
     ]
     @classmethod
     def get_function_int_arg_reg(cls, nr):
-        return Register(RegType.int64, cls.function_int_arg_regs[nr])
+        return Register(RegType.int32, cls.function_int_arg_regs[nr])
     @classmethod
     def get_function_fp_arg_reg(cls, nr):
         return Register(RegType.float64, cls.function_fp_arg_regs[nr])
@@ -555,7 +555,7 @@ class i386_encoding(RegAlloc):
     @classmethod
     def get_function_res_reg(cls, is_int):
         if is_int:
-            return Register(RegType.int64, cls.function_int_arg_regs[0])
+            return Register(RegType.int32, cls.function_int_arg_regs[0])
         else:
             return Register(RegType.float64, cls.function_fp_arg_regs[0])
 
@@ -759,9 +759,38 @@ class rv_encoding(RegAlloc):
     rA5 = 0b01111
     rA6 = 0b10000
     rA7 = 0b10001
+    rf0 = 0b00000
+    rf1 = 0b00001
+    rf2 = 0b00010
+    rf3 = 0b00011
+    rf4 = 0b00100
+    rf5 = 0b00101
+    rf6 = 0b00110
+    rf7 = 0b00111
 
     def __init__(self):
         super().__init__(5, self.n_int_regs, 1, self.n_fp_regs)
+
+    function_int_arg_regs = [
+        rA0,
+        rA1,
+        rA2,
+        rA3,
+        rA4,
+        rA5,
+        rA6,
+        rA7
+    ]
+    function_fp_arg_regs = [
+        rf0,
+        rf1,
+        rf2,
+        rf3,
+        rf4,
+        rf5,
+        rf6,
+        rf7
+    ]
 
     @staticmethod
     def gen_loadimm(reg, val, width = 0, signed = False):
@@ -876,9 +905,37 @@ class rv_encoding(RegAlloc):
 class rv32_encoding(rv_encoding):
     nbits = 32           # processor bits
 
+    @classmethod
+    def get_function_int_arg_reg(cls, nr):
+        return Register(RegType.int64, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_function_fp_arg_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+
+    @classmethod
+    def get_function_res_reg(cls, is_int):
+        if is_int:
+            return Register(RegType.int64, cls.function_int_arg_regs[0])
+        else:
+            return Register(RegType.float64, cls.function_fp_arg_regs[0])
+
 
 class rv64_encoding(rv_encoding):
     nbits = 64           # processor bits
+
+    @classmethod
+    def get_function_int_arg_reg(cls, nr):
+        return Register(RegType.int32, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_function_fp_arg_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+
+    @classmethod
+    def get_function_res_reg(cls, is_int):
+        if is_int:
+            return Register(RegType.int32, cls.function_int_arg_regs[0])
+        else:
+            return Register(RegType.float64, cls.function_fp_arg_regs[0])
 
 
 class arm_encoding(RegAlloc):
