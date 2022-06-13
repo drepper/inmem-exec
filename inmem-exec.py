@@ -1760,8 +1760,7 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
 
-    def gen_load_refarg(self, is_syscall, n, a):
-        reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
+    def gen_load_ref(self, reg, a):
         match a:
             case Symbol(_):
                 for code, add, rel in self.arch_os_traits.gen_loadref(reg, 0):
@@ -2144,6 +2143,7 @@ class Program(Config):
     def compile_call(self, name, args):
         is_syscall = self.known_syscall(name)
 
+        # XYZ Don't save for syscalls if not necessary
         for v in self.current_fct.known:
             if type(self.current_fct.known[v]) == Register:
                 offset = self.gen_frame_store(self.current_fct.known[v])
@@ -2156,7 +2156,7 @@ class Program(Config):
                     self.gen_load_val(reg, a)
                 case ast.Constant(s) if type(s) == str:
                     id = self.store_cstring(s)
-                    self.gen_load_refarg(is_syscall, idx, self.symbols[id])
+                    self.gen_load_ref(reg, self.symbols[id])
                 case ast.Name(id,_):
                     self.gen_load_val(reg, self.symbols[id])
                 case _:
