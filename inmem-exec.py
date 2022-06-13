@@ -1760,10 +1760,6 @@ class Program(Config):
             case _:
                 raise RuntimeError(f'unhandled parameter type {type(a)}')
 
-    def gen_load_arg(self, is_syscall, n, a):
-        reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
-        self.gen_load_val(reg, a)
-
     def gen_load_refarg(self, is_syscall, n, a):
         reg = self.arch_os_traits.get_syscall_arg_reg(n) if is_syscall else self.arch_os_traits.get_function_arg_reg(n)
         match a:
@@ -2154,14 +2150,15 @@ class Program(Config):
                 self.current_fct.known[v] = StackSlot(self.current_fct.known[v].is_int, offset)
 
         for idx, a in enumerate(args):
+            reg = self.arch_os_traits.get_syscall_arg_reg(idx) if is_syscall else self.arch_os_traits.get_function_arg_reg(idx)
             match a:
                 case ast.Constant(s) if type(s) == int:
-                    self.gen_load_arg(is_syscall, idx, a)
+                    self.gen_load_val(reg, a)
                 case ast.Constant(s) if type(s) == str:
                     id = self.store_cstring(s)
                     self.gen_load_refarg(is_syscall, idx, self.symbols[id])
                 case ast.Name(id,_):
-                    self.gen_load_arg(is_syscall, idx, self.symbols[id])
+                    self.gen_load_val(reg, self.symbols[id])
                 case _:
                     raise RuntimeError(f'unhandled function parameter type {a}')
         if is_syscall:
