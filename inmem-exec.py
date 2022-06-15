@@ -751,6 +751,9 @@ class rv_encoding(RegAlloc):
     n_int_regs = 32
     n_fp_regs = 32
 
+    rRA = 0b00001
+    rSP = 0b00010
+    rFP = 0b01000
     rA0 = 0b01010
     rA1 = 0b01011
     rA2 = 0b01100
@@ -759,17 +762,17 @@ class rv_encoding(RegAlloc):
     rA5 = 0b01111
     rA6 = 0b10000
     rA7 = 0b10001
-    rf0 = 0b00000
-    rf1 = 0b00001
-    rf2 = 0b00010
-    rf3 = 0b00011
-    rf4 = 0b00100
-    rf5 = 0b00101
-    rf6 = 0b00110
-    rf7 = 0b00111
+    rFA0 = 0b01010
+    rFA1 = 0b01011
+    rFA2 = 0b01100
+    rFA3 = 0b01101
+    rFA4 = 0b01110
+    rFA5 = 0b01111
+    rFA6 = 0b10000
+    rFA7 = 0b10001
 
     def __init__(self):
-        super().__init__(5, self.n_int_regs, 1, self.n_fp_regs)
+        super().__init__(5, self.n_int_regs, 0, self.n_fp_regs)
 
     function_int_arg_regs = [
         rA0,
@@ -782,14 +785,14 @@ class rv_encoding(RegAlloc):
         rA7
     ]
     function_fp_arg_regs = [
-        rf0,
-        rf1,
-        rf2,
-        rf3,
-        rf4,
-        rf5,
-        rf6,
-        rf7
+        rFA0,
+        rFA1,
+        rFA2,
+        rFA3,
+        rFA4,
+        rFA5,
+        rFA6,
+        rFA7
     ]
 
     @staticmethod
@@ -874,6 +877,9 @@ class rv_encoding(RegAlloc):
                 case ast.Eq():
                     res = self.gen_binop(l, r, ast.Sub())
                     res += ((0b000000000001 << 20) | (l.n << 15) | (0b011 << 12) | (l.n << 7) | 0b0010011).to_bytes(4, 'little')
+                case ast.NotEq():
+                    res = self.gen_binop(l, r, ast.Sub())
+                    res += ((l.n << 20) | (0b011 << 12) | (l.n << 7) | 0b0110011).to_bytes(4, 'little')
                 case _:
                     raise RuntimeError(f'unsupported compare {op}')
             return res, l
@@ -899,8 +905,52 @@ class rv_encoding(RegAlloc):
         else:
             assert not flags.reg[1].is_int
 
-    def gen_jump(self, curoff, lab):
+    @staticmethod
+    def gen_jump(curoff, lab):
         return [ ((0b1101111).to_bytes(4, 'little'), Relocation(lab, b'.text', curoff, RelType.rvjal)) ]
+
+    @classmethod
+    def gen_call(cls, curoff, lab):
+        return [ (((cls.rRA << 7) | 0b1101111).to_bytes(4, 'little'), Relocation(lab, b'.text', curoff, RelType.rvjal)) ]
+
+    @classmethod
+    def gen_return(cls):
+        return ((cls.rRA << 15) | 0b1100111).to_bytes(4, 'little')
+
+    @classmethod
+    def gen_create_stackframe(cls):
+        res = (((-(cls.nbits // 8) & 0xfff) << 20) | (cls.rSP << 15) | (cls.rSP << 7) | 0b0010011).to_bytes(4, 'little')
+        logwidth = math.frexp(cls.nbits / 8)[1] - 1
+        res += ((cls.rFP << 20) | (cls.rSP << 15) | (logwidth << 12) | 0b0100011).to_bytes(4, 'little')
+        res += (((cls.nbits // 8) & 0xfff) << 20 | (cls.rSP << 15) | (cls.rFP << 7) | 0b0010011).to_bytes(4, 'little')
+        return res
+
+    @classmethod
+    def gen_destroy_stackframe(cls):
+        res = ((-(cls.nbits // 8) & 0xfff) << 20 | (cls.rFP << 15) | (cls.rSP << 7) | 0b0010011).to_bytes(4, 'little')
+        logwidth = math.frexp(cls.nbits / 8)[1] - 1
+        res += ( (cls.rSP << 15) | (logwidth << 12) | (cls.rFP << 7) |0b0000011).to_bytes(4, 'little')
+        res += (((cls.nbits // 8) & 0xfff) << 20 | (cls.rSP << 15) | (cls.rSP << 7) | 0b0010011).to_bytes(4, 'little')
+        return res
+
+    @classmethod
+    def gen_frame_store(cls, reg):
+        res = ((-(cls.nbits // 8) & 0xfff) << 20 | (cls.rSP << 15) | (cls.rSP << 7) | 0b0010011).to_bytes(4, 'little')
+        logwidth = math.frexp(cls.nbits / 8)[1] - 1
+        res += ((reg.n << 20) | (cls.rSP << 15) | (logwidth << 12) | 0b0100011).to_bytes(4, 'little')
+        return res, cls.nbits // 8
+
+    @classmethod
+    def gen_frame_load(cls, reg, offset):
+        # The FP register by convention points before the stored previous value.  So the frame is one slot larger.
+        offset += cls.nbits // 8
+        logwidth = math.frexp(cls.nbits / 8)[1] - 1
+        res = (((-offset & 0xfff) << 20) | (cls.rSP << 15) | (logwidth << 12) | (reg.n << 7) | 0b0000011).to_bytes(4, 'little')
+        return res
+
+    @classmethod
+    def gen_move_reg(cls, dreg, sreg):
+        return ((sreg.n << 15) | (dreg.n << 7) | 0b0010011).to_bytes(4, 'little')
 
 class rv32_encoding(rv_encoding):
     nbits = 32           # processor bits
@@ -1289,6 +1339,10 @@ class linux_rv32_traits(rv32_encoding, linux_traits):
         return Register(RegType.int32, cls.syscall_arg_regs[nr])
 
     @classmethod
+    def get_syscall_res_reg(cls):
+        return Register(RegType.int32, cls.rA0)
+
+    @classmethod
     def gen_syscall(cls, nr):
         res = cls.gen_loadimm(Register(RegType.int32, cls.rA7), nr)
         res += b'\x73\x00\x00\x00'       # ecall
@@ -1314,6 +1368,10 @@ class linux_rv64_traits(rv64_encoding, linux_traits):
     @classmethod
     def get_syscall_arg_reg(cls, nr):
         return Register(RegType.int64, cls.syscall_arg_regs[nr])
+
+    @classmethod
+    def get_syscall_res_reg(cls):
+        return Register(RegType.int64, cls.rA0)
 
     @classmethod
     def gen_syscall(cls, nr):
@@ -2068,7 +2126,8 @@ class Program(Config):
 
         shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', elfdef.SHT_STRTAB, 0, e.shstrtab, 1)
 
-        e.update(elfdef.ELF_C_NULL)
+        size = e.update(elfdef.ELF_C_NULL)
+        print(f'size={size}')
 
         lastvaddr = self.loadaddr
         for s in segments:
@@ -2093,9 +2152,11 @@ class Program(Config):
         ehdr.contents.shstrndx = e.ndxscn(shstrscn)
         ehdr.contents.entry = self.symbols['main'].addr if 'main' in self.symbols else codeshdr.contents.addr
 
-        e.update(elfdef.ELF_C_WRITE_MMAP)
+        size = e.update(elfdef.ELF_C_WRITE_MMAP)
+        print(f'size={size}')
 
-        e.end()
+        status = e.end()
+        print(f'status={status}')
 
         return self
 
@@ -2178,14 +2239,16 @@ class Program(Config):
                 if reg.is_int != is_int:
                     raise RuntimeError(f'conversion of return value not implemented')
                 if reg.n != n:
-                    self.arch_os_traits.move_reg(reg, expr)
+                    res = self.arch_os_traits.gen_move_reg(reg, expr)
+                    self.codebuf += res
             case Flags(op, freg):
                 if not freg:
                     self.gen_store_flag(op, reg)
                 elif not reg.is_int:
                     raise RuntimeError(f'conversion of return value not implemented')
                 elif reg.n != freg.n:
-                    self.arch_os_traits.move_reg(reg, freg)
+                    res = self.arch_os_traits.gen_move_reg(reg, freg)
+                    self.codebuf += res
             case _:
                 raise RuntimeError(f'cannot force {expr} into register {reg}')
 
