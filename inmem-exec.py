@@ -1004,9 +1004,52 @@ class arm_encoding(RegAlloc):
     r5 = 0b0101
     r6 = 0b0110
     r7 = 0b0111
+    rFP = 0b1011
+    rSP = 0b1101
+    rLR = 0b1110
+    rF0 = 0b0000
+    rF1 = 0b0001
+    rF2 = 0b0010
+    rF3 = 0b0011
+    rF4 = 0b0100
+    rF5 = 0b0101
+    rF6 = 0b0110
+    rF7 = 0b0111
 
     def __init__(self):
         super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
+
+    function_int_arg_regs = [
+        r0,
+        r1,
+        r2,
+        r3,
+        r4,
+        r5
+    ]
+    function_fp_arg_regs = [
+        rF0,
+        rF1,
+        rF2,
+        rF3,
+        rF4,
+        rF5,
+        rF6,
+        rF7
+    ]
+    @classmethod
+    def get_function_int_arg_reg(cls, nr):
+        return Register(RegType.int32, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_function_fp_arg_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+
+    @classmethod
+    def get_function_res_reg(cls, is_int):
+        if is_int:
+            return Register(RegType.int32, cls.function_int_arg_regs[0])
+        else:
+            return Register(RegType.float64, cls.function_fp_arg_regs[0])
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
@@ -1099,6 +1142,8 @@ class arm_encoding(RegAlloc):
         match op:
             case ast.Eq():
                 res += ((0b0000 << 28) | 0x3a00000 | (reg.n << 12) | 1).to_bytes(4, self.endian)
+            case ast.NotEq():
+                res += ((0b0001 << 28) | 0x3a00000 | (reg.n << 12) | 1).to_bytes(4, self.endian)
             case _:
                 raise RuntimeError(f'unsupported comparison {op}')
         return res, reg
@@ -1115,6 +1160,36 @@ class arm_encoding(RegAlloc):
 
     def gen_jump(self, curoff, lab):
         return [ (((0b1110 << 28) | (0b1010 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
+
+    def gen_call(self, curoff, lab):
+        return [ (((0b1110 << 28) | (0b1011 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
+
+    def gen_return(self):
+        return (0xe12fff10 | self.rLR).to_bytes(4, self.endian)
+
+    def gen_create_stackframe(self):
+        res = ((0xe92d << 16) | (1 << self.rLR) | (1 << self.rFP)).to_bytes(4, self.endian)
+        res += ((0xe28 << 20) | (self.rSP << 16) | (self.rFP << 12) | 0b000000000100).to_bytes(4, self.endian)
+        return res
+
+    def gen_destroy_stackframe(self):
+        res = ((0xe24 << 20) | (self.rFP << 16) | (self.rSP << 12) | 0b000000000100).to_bytes(4, self.endian)
+        res += ((0xe8bd << 16) | (1 << self.rLR) | (1 << self.rFP)).to_bytes(4, self.endian)
+        return res
+
+    def gen_frame_store(self, reg):
+        if reg.is_int:
+            res = ((0xe92d << 16) | (1 << reg.n)).to_bytes(4, self.endian)
+            return res, 4
+        else:
+            raise RuntimeError(f'store fp on stack frame not supported')
+
+    def gen_frame_load(self, reg, offset):
+        if reg.is_int:
+            res = ((0xe59 << 20) | (reg.n << 16) | (self.rFP << 12) | ((-4 - offset) & 0xfff)).to_bytes(4, self.endian)
+        else:
+            raise RuntimeError(f'load fp from frame not supported')
+        return res
 
 
 class aarch64_encoding(RegAlloc):
@@ -1399,6 +1474,10 @@ class linux_arm_traits(arm_encoding, linux_traits):
     @classmethod
     def get_syscall_arg_reg(cls, nr):
         return Register(RegType.int32, cls.syscall_arg_regs[nr])
+
+    @classmethod
+    def get_syscall_res_reg(cls):
+        return Register(RegType.int32, cls.r0)
 
     @classmethod
     def gen_syscall(cls, nr):
