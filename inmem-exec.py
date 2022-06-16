@@ -305,7 +305,7 @@ class x86_64_encoding(RegAlloc):
             res = (rex.to_bytes(1, 'little') if rex else b'') + (0xb8 + (reg.n & 0b111)).to_bytes(1, 'little') + val.to_bytes(valwidth, 'little')
             return res
         else:
-            raise RuntimeError('fp loadimm not yet handled')
+            raise NotImplementedError('fp loadimm not yet handled')
 
     @classmethod
     def gen_loadmem(cls, reg, width):
@@ -316,7 +316,7 @@ class x86_64_encoding(RegAlloc):
             res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x8b' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
             return [ (res, (4 if rex else 3), RelType.abs4) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @staticmethod
     def gen_loadref(reg, offset):
@@ -371,7 +371,7 @@ class x86_64_encoding(RegAlloc):
             res = (rex.to_bytes(1, 'little') if rex else b'') + b'\x89' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
             return [ (res, (4 if rex else 3), RelType.abs4) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @classmethod
     def gen_aug_savemem(cls, op, reg, width):
@@ -407,14 +407,14 @@ class x86_64_encoding(RegAlloc):
                 case ast.BitXor():
                     res += b'\x31'
                 case _:
-                    raise RuntimeError(f'unsupported binop {op}')
+                    raise NotImplementedError(f'unsupported binop {op}')
             res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
             self.release_reg(rreg)
             return res
         else:
             assert not resreg.is_int
             assert not rreg.is_int
-            raise RuntimeError('fp binop not yet implemented')
+            raise NotImplementedError('fp binop not yet implemented')
 
     def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
@@ -427,7 +427,7 @@ class x86_64_encoding(RegAlloc):
         else:
             assert not l.is_int
             assert not r.is_int
-            raise RuntimeError('fp compare not yet implemented')
+            raise NotImplementedError('fp compare not yet implemented')
 
     def gen_store_flag(self, op, reg):
         if not reg:
@@ -442,7 +442,7 @@ class x86_64_encoding(RegAlloc):
             case ast.NotEq():
                 res += b'\x95'
             case _:
-                raise RuntimeError(f'unsupported comparison {op}')
+                raise NotImplementedError(f'unsupported comparison {op}')
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
         return res, reg
 
@@ -455,7 +455,7 @@ class x86_64_encoding(RegAlloc):
             case (ast.Eq(), True) | (ast.NotEq(), False):
                 res += b'\x84'
             case _:
-                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+                raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
     @staticmethod
@@ -485,7 +485,7 @@ class x86_64_encoding(RegAlloc):
             res += (0x50 + (reg.n & 0b111)).to_bytes(1, 'little')
             return res, 8
         else:
-            raise RuntimeError(f'store fp on stack frame not supported')
+            raise NotImplementedError(f'store fp on stack frame not supported')
 
     @staticmethod
     def gen_frame_load(reg, offset):
@@ -497,7 +497,7 @@ class x86_64_encoding(RegAlloc):
             else:
                 res += (0x85 + ((reg .n & 0b111) << 3)).to_bytes(1, 'little') + (-offset).to_bytes(4, 'little', signed=True)
         else:
-            raise RuntimeError(f'load fp from frame not supported')
+            raise NotImplementedError(f'load fp from frame not supported')
         return res
 
 class i386_encoding(RegAlloc):
@@ -565,7 +565,7 @@ class i386_encoding(RegAlloc):
             res = (0xb8 + reg.n).to_bytes(1, 'little') + val.to_bytes(4, 'little')
             return res
         else:
-            raise RuntimeError('fp loadimm not yet handled')
+            raise NotImplementedError('fp loadimm not yet handled')
 
     @staticmethod
     def gen_loadmem(reg, width):
@@ -573,7 +573,7 @@ class i386_encoding(RegAlloc):
             res = b'\x8b' + (0x05 + (reg.n << 3)).to_bytes(1, 'little') + b'\x00\x00\x00\x00'
             return [ (res, 2, RelType.abs4) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @staticmethod
     def gen_loadref(reg, offset):
@@ -622,7 +622,7 @@ class i386_encoding(RegAlloc):
             res = b'\x89' + (0x04 + ((reg.n & 0b111) << 3)).to_bytes(1, 'little') + b'\x25' + b'\x00\x00\x00\x00'
             return [ (res, 3, RelType.abs4) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @classmethod
     def gen_aug_savemem(cls, op, reg, width):
@@ -655,14 +655,14 @@ class i386_encoding(RegAlloc):
                 case ast.BitXor():
                     res = b'\x31'
                 case _:
-                    raise RuntimeError(f'unsupported binop {op}')
+                    raise NotImplementedError(f'unsupported binop {op}')
             res += (0xc0 + (rreg.n << 3) + resreg.n).to_bytes(1, 'little')
             self.release_reg(rreg)
             return res
         else:
             assert not resreg.is_int
             assert not rreg.is_int
-            raise RuntimeError('fp binop not yet implemented')
+            raise NotImplementedError('fp binop not yet implemented')
 
     def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
@@ -674,7 +674,7 @@ class i386_encoding(RegAlloc):
         else:
             assert not l.is_int
             assert not r.is_int
-            raise RuntimeError('fp compare not yet implemented')
+            raise NotImplementedError('fp compare not yet implemented')
 
     def gen_store_flag(self, op, reg):
         if not reg:
@@ -687,7 +687,7 @@ class i386_encoding(RegAlloc):
             case ast.NotEq():
                 res += b'\x95'
             case _:
-                raise RuntimeError(f'unsupported comparison {op}')
+                raise NotImplementedError(f'unsupported comparison {op}')
         res += (0xc0 + (reg.n & 0b111)).to_bytes(1, 'little')
         return res, reg
 
@@ -700,7 +700,7 @@ class i386_encoding(RegAlloc):
             case (ast.Eq(), True) | (ast.NotEq(), False):
                 res += b'\x84'
             case _:
-                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+                raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
         return [ (res + b'\x00\x00\x00\x00', Relocation(lab, b'.text', curoff + 2, RelType.rel4a)) ]
 
     @staticmethod
@@ -729,7 +729,7 @@ class i386_encoding(RegAlloc):
             res = (0x50 + (reg.n & 0b111)).to_bytes(1, 'little')
             return res, 8
         else:
-            raise RuntimeError(f'store fp on stack frame not supported')
+            raise NotImplementedError(f'store fp on stack frame not supported')
 
     @staticmethod
     def gen_frame_load(reg, offset):
@@ -741,7 +741,7 @@ class i386_encoding(RegAlloc):
             else:
                 res += (0x85 + ((reg .n & 0b111) << 3)).to_bytes(1, 'little') + (-offset).to_bytes(4, 'little', signed=True)
         else:
-            raise RuntimeError(f'load fp from frame not supported')
+            raise NotImplementedError(f'load fp from frame not supported')
         return res
 
 
@@ -807,7 +807,7 @@ class rv_encoding(RegAlloc):
                 res = word1.to_bytes(4, 'little') + word2.to_bytes(4, 'little')
             return res
         else:
-            raise RuntimeError('fp loadimm not yet handled')
+            raise NotImplementedError('fp loadimm not yet handled')
 
     @staticmethod
     def gen_loadmem(reg, width, signed = False):
@@ -819,7 +819,7 @@ class rv_encoding(RegAlloc):
             res2 = word2.to_bytes(4, 'little')
             return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @staticmethod
     def gen_loadref(reg, offset):
@@ -842,7 +842,7 @@ class rv_encoding(RegAlloc):
             self.release_reg(addrreg)
             return [ (res1, 0, RelType.rvhi), (res2, 0, RelType.rvlo2) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
@@ -860,13 +860,13 @@ class rv_encoding(RegAlloc):
                 case ast.BitXor():
                     word = (0b100 << 12) | 0b0110011
                 case _:
-                    raise RuntimeError(f'unsupported binop {op}')
+                    raise NotImplementedError(f'unsupported binop {op}')
             self.release_reg(rreg)
             return (word | (rreg.n << 20) | (resreg.n << 15) | (resreg.n << 7)).to_bytes(4, 'little')
         else:
             assert not resreg.is_int
             assert not rreg.is_int
-            raise RuntimeError('fp binop not yet implemented')
+            raise NotImplementedError('fp binop not yet implemented')
 
     def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
@@ -881,11 +881,11 @@ class rv_encoding(RegAlloc):
                     res = self.gen_binop(l, r, ast.Sub())
                     res += ((l.n << 20) | (0b011 << 12) | (l.n << 7) | 0b0110011).to_bytes(4, 'little')
                 case _:
-                    raise RuntimeError(f'unsupported compare {op}')
+                    raise NotImplementedError(f'unsupported compare {op}')
             return res, l
         else:
             assert not r.is_int
-            raise RuntimeError('fp compare not yet implemented')
+            raise NotImplementedError('fp compare not yet implemented')
 
     def gen_condjump(self, curoff, flags, exp, lab):
         assert type(flags.reg) == tuple and len(flags.reg) == 2
@@ -901,7 +901,7 @@ class rv_encoding(RegAlloc):
                     word2 = 0b1101111
                     return [ (word1.to_bytes(4, 'little'), None), (word2.to_bytes(4, 'little'), Relocation(lab, b'.text', curoff + 4, RelType.rvjal)) ]
                 case _:
-                    raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+                    raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
         else:
             assert not flags.reg[1].is_int
 
@@ -1069,7 +1069,7 @@ class arm_encoding(RegAlloc):
                     res += (0xe3400000 | ((val >> 12) & 0xf0000) | ((val >> 16) & 0xfff)).to_bytes(4, cls.endian)
             return res
         else:
-            raise RuntimeError('fp loadimm not yet handled')
+            raise NotImplementedError('fp loadimm not yet handled')
 
     @classmethod
     def gen_loadmem(cls, reg, width, signed = False):
@@ -1079,7 +1079,7 @@ class arm_encoding(RegAlloc):
             res3 = (0xe5900000 | (reg.n << 16) | (reg.n << 12)).to_bytes(4, cls.endian)
             return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs), (res3, 0, RelType.none) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @classmethod
     def gen_loadref(cls, reg, offset):
@@ -1097,7 +1097,7 @@ class arm_encoding(RegAlloc):
             self.release_reg(addrreg)
             return [ (res1, 0, RelType.armmovwabs), (res2, 0, RelType.armmovtabs), (res3, 0, RelType.none) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
@@ -1115,13 +1115,13 @@ class arm_encoding(RegAlloc):
                 case ast.BitXor():
                     word = 0xe0200000
                 case _:
-                    raise RuntimeError(f'unsupported binop {op}')
+                    raise NotImplementedError(f'unsupported binop {op}')
             self.release_reg(rreg)
             return (word | (resreg.n << 16) | (resreg.n << 12) | rreg.n).to_bytes(4, self.endian)
         else:
             assert not resreg.is_int
             assert not rreg.is_int
-            raise RuntimeError('fp binop not yet implemented')
+            raise NotImplementedError('fp binop not yet implemented')
 
     def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
@@ -1133,7 +1133,7 @@ class arm_encoding(RegAlloc):
         else:
             assert not l.is_int
             assert not r.is_int
-            raise RuntimeError('fp compare not yet implemented')
+            raise NotImplementedError('fp compare not yet implemented')
 
     def gen_store_flag(self, op, reg):
         if not reg:
@@ -1145,7 +1145,7 @@ class arm_encoding(RegAlloc):
             case ast.NotEq():
                 res += ((0b0001 << 28) | 0x3a00000 | (reg.n << 12) | 1).to_bytes(4, self.endian)
             case _:
-                raise RuntimeError(f'unsupported comparison {op}')
+                raise NotImplementedError(f'unsupported comparison {op}')
         return res, reg
 
     def gen_condjump(self, curoff, flags, exp, lab):
@@ -1155,7 +1155,7 @@ class arm_encoding(RegAlloc):
             case (ast.Eq(), False) | (ast.NotEq(), True):
                 cond = 0b0001
             case _:
-                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+                raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
         return [ (((cond << 28) | (0b1010 << 24)).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.armb24)) ]
 
     def gen_jump(self, curoff, lab):
@@ -1182,13 +1182,13 @@ class arm_encoding(RegAlloc):
             res = ((0xe92d << 16) | (1 << reg.n)).to_bytes(4, self.endian)
             return res, 4
         else:
-            raise RuntimeError(f'store fp on stack frame not supported')
+            raise NotImplementedError(f'store fp on stack frame not supported')
 
     def gen_frame_load(self, reg, offset):
         if reg.is_int:
             res = ((0xe59 << 20) | (reg.n << 16) | (self.rFP << 12) | ((-4 - offset) & 0xfff)).to_bytes(4, self.endian)
         else:
-            raise RuntimeError(f'load fp from frame not supported')
+            raise NotImplementedError(f'load fp from frame not supported')
         return res
 
 
@@ -1230,7 +1230,7 @@ class aarch64_encoding(RegAlloc):
                 res += (0xf2a00000 | ((val >> 11) & 0x1fffe0) | reg.n).to_bytes(4, cls.endian)
             return res
         else:
-            raise RuntimeError('fp loadimm not yet handled')
+            raise NotImplementedError('fp loadimm not yet handled')
 
     @classmethod
     def gen_loadmem(cls, reg, width, signed = False):
@@ -1240,7 +1240,7 @@ class aarch64_encoding(RegAlloc):
             res3 = ((0xf9400000 if width == 8 else 0xb9400000) | (reg.n << 5) | reg.n).to_bytes(4, cls.endian)
             return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     @classmethod
     def gen_loadref(cls, reg, offset):
@@ -1259,7 +1259,7 @@ class aarch64_encoding(RegAlloc):
             self.release_reg(addrreg)
             return [ (res1, 0, RelType.aarch64lo16abs), (res2, 0, RelType.aarch64hi16abs), (res3, 0, RelType.none) ]
         else:
-            raise RuntimeError('fp regs not yet handled')
+            raise NotImplementedError('fp regs not yet handled')
 
     def gen_binop(self, resreg, rreg, op):
         if resreg.is_int:
@@ -1277,13 +1277,13 @@ class aarch64_encoding(RegAlloc):
                 case ast.BitXor():
                     word = 0xca000000
                 case _:
-                    raise RuntimeError(f'unsupported binop {op}')
+                    raise NotImplementedError(f'unsupported binop {op}')
             self.release_reg(rreg)
             return (word | (rreg.n << 16) | (resreg.n << 5) | resreg.n).to_bytes(4, self.endian)
         else:
             assert not resreg.is_int
             assert not rreg.is_int
-            raise RuntimeError('fp binop not yet implemented')
+            raise NotImplementedError('fp binop not yet implemented')
 
     def gen_compare(self, l, r, op, condjmpctx):
         if l.is_int:
@@ -1295,7 +1295,7 @@ class aarch64_encoding(RegAlloc):
         else:
             assert not l.is_int
             assert not r.is_int
-            raise RuntimeError('fp compare not yet implemented')
+            raise NotImplementedError('fp compare not yet implemented')
 
     def gen_store_flag(self, op, reg):
         if not reg:
@@ -1305,7 +1305,7 @@ class aarch64_encoding(RegAlloc):
             case ast.Eq():
                 res = (0x9a9f17e0 | reg.n).to_bytes(4, self.endian)
             case _:
-                raise RuntimeError(f'unsupported comparison {op}')
+                raise NotImplementedError(f'unsupported comparison {op}')
         return res, reg
 
     def gen_condjump(self, curoff, flags, exp, lab):
@@ -1315,7 +1315,7 @@ class aarch64_encoding(RegAlloc):
             case (ast.Eq(), False) | (ast.NotEq(), True):
                 cond = 0b0001
             case _:
-                raise RuntimeError(f'unhandled condjump {flags.op}/{exp}')
+                raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
         return [ (((0b01010100 << 24) | cond).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64bc19)) ]
 
     def gen_jump(self, curoff, lab):
