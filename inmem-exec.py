@@ -1186,7 +1186,7 @@ class arm_encoding(RegAlloc):
 
     def gen_frame_load(self, reg, offset):
         if reg.is_int:
-            res = ((0xe59 << 20) | (reg.n << 16) | (self.rFP << 12) | ((-4 - offset) & 0xfff)).to_bytes(4, self.endian)
+            res = ((0xe59 << 20) | (self.rFP << 16) | (reg.n << 12) | ((-4 - offset) & 0xfff)).to_bytes(4, self.endian)
         else:
             raise NotImplementedError(f'load fp from frame not supported')
         return res
