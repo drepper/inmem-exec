@@ -121,6 +121,9 @@ class RegMask(object):
     def __getitem__(self, key):
         return self.a[key]
 
+    def __str__(self):
+        return f'RegMask({",".join([str(i) for i,v in enumerate(self.a) if v])})'
+
 
 class RegAlloc(object):
     def __init__(self, first_int, n_int_regs, first_fp, n_fp_regs):
@@ -135,7 +138,7 @@ class RegAlloc(object):
         self.cur_used[:] = False
         for reg in parmregs:
             if reg.is_int:
-                self.cur_used[reg.n]  = True
+                self.cur_used[reg.n] = True
             else:
                 self.cur_used[self.n_int_regs + reg.n] = True
 
@@ -1186,7 +1189,7 @@ class arm_encoding(RegAlloc):
 
     def gen_frame_load(self, reg, offset):
         if reg.is_int:
-            res = ((0xe59 << 20) | (self.rFP << 16) | (reg.n << 12) | ((-4 - offset) & 0xfff)).to_bytes(4, self.endian)
+            res = ((0xe51 << 20) | (self.rFP << 16) | (reg.n << 12) | ((4 + offset) & 0xfff)).to_bytes(4, self.endian)
         else:
             raise NotImplementedError(f'load fp from frame not supported')
         return res
@@ -2206,7 +2209,6 @@ class Program(Config):
         shstrscn, shstrshdr, shstrdata = e.newscn(b'.shstrtab', elfdef.SHT_STRTAB, 0, e.shstrtab, 1)
 
         size = e.update(elfdef.ELF_C_NULL)
-        print(f'size={size}')
 
         lastvaddr = self.loadaddr
         for s in segments:
@@ -2232,10 +2234,8 @@ class Program(Config):
         ehdr.contents.entry = self.symbols['main'].addr if 'main' in self.symbols else codeshdr.contents.addr
 
         size = e.update(elfdef.ELF_C_WRITE_MMAP)
-        print(f'size={size}')
 
         status = e.end()
-        print(f'status={status}')
 
         return self
 
@@ -2426,8 +2426,10 @@ class Program(Config):
         # XYZ Don't save for syscalls if not necessary
         for v in self.current_fct.known:
             if type(self.current_fct.known[v]) == Register:
-                offset = self.gen_frame_store(self.current_fct.known[v])
+                reg = self.current_fct.known[v]
+                offset = self.gen_frame_store(reg)
                 self.current_fct.known[v] = StackSlot(self.current_fct.known[v].is_int, offset)
+                self.arch_os_traits.release_reg(reg)
 
         for idx, a in enumerate(args):
             if is_syscall:
@@ -2435,6 +2437,7 @@ class Program(Config):
             else:
                 pname = called.paramname[idx]
                 preg = called.paramreg[pname]
+            self.arch_os_traits.mark_used(preg)
             match a:
                 case ast.Constant(s) if type(s) == int:
                     self.gen_load_val(preg, a)
@@ -2459,6 +2462,7 @@ class Program(Config):
             else:
                 resreg = self.arch_os_traits.get_function_res_reg(type_is_int(called.returntype))
 
+        self.arch_os_traits.clear_used([ resreg ])
         # Return register carrying results.
         return resreg
 
