@@ -1212,9 +1212,55 @@ class aarch64_encoding(RegAlloc):
     x6 = 0b00110
     x7 = 0b00111
     x8 = 0b01000
+    x29 = 0b11101
+    x30 = 0b11110
+    rSP = 0b11111
+    rF0 = 0b00000
+    rF1 = 0b00001
+    rF2 = 0b00010
+    rF3 = 0b00011
+    rF4 = 0b00100
+    rF5 = 0b00101
+    rF6 = 0b00110
+    rF7 = 0b00111
+    rF8 = 0b01000
 
     def __init__(self):
-        super().__init__(0, self.n_int_regs, 0, self.n_fp_regs)
+        super().__init__(0, self.n_int_regs - 3, 0, self.n_fp_regs)
+
+    function_int_arg_regs = [
+        x0,
+        x1,
+        x2,
+        x3,
+        x4,
+        x5,
+        x6,
+        x7
+    ]
+    function_fp_arg_regs = [
+        rF0,
+        rF1,
+        rF2,
+        rF3,
+        rF4,
+        rF5,
+        rF6,
+        rF7
+    ]
+    @classmethod
+    def get_function_int_arg_reg(cls, nr):
+        return Register(RegType.int64, cls.function_int_arg_regs[nr])
+    @classmethod
+    def get_function_fp_arg_reg(cls, nr):
+        return Register(RegType.float64, cls.function_fp_arg_regs[nr])
+
+    @classmethod
+    def get_function_res_reg(cls, is_int):
+        if is_int:
+            return Register(RegType.int32, cls.function_int_arg_regs[0])
+        else:
+            return Register(RegType.float64, cls.function_fp_arg_regs[0])
 
     @classmethod
     def gen_loadimm(cls, reg, val, width = 0, signed = False):
@@ -1307,6 +1353,8 @@ class aarch64_encoding(RegAlloc):
         match op:
             case ast.Eq():
                 res = (0x9a9f17e0 | reg.n).to_bytes(4, self.endian)
+            case ast.NotEq():
+                res = (0x9a9f07e0 | reg.n).to_bytes(4, self.endian)
             case _:
                 raise NotImplementedError(f'unsupported comparison {op}')
         return res, reg
@@ -1322,7 +1370,45 @@ class aarch64_encoding(RegAlloc):
         return [ (((0b01010100 << 24) | cond).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64bc19)) ]
 
     def gen_jump(self, curoff, lab):
+        # B <lab>
         return [ ((0b000101 << 26).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64b26))]
+
+    def gen_call(self, curoff, lab):
+        # BL <lab>
+        return [ ((0b100101 << 26).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64b26))]
+
+    def gen_return(self):
+        return (0xd65f0000 | (self.x30 << 5)).to_bytes(4, self.endian)
+
+    def gen_create_stackframe(self):
+        # STP x29, x30, [sp, #-16]!
+        res = ((0b1010100110 << 22) | ((-16 & 0x7f) << 15) | (self.x30 << 10) | (self.rSP << 5) | self.x29).to_bytes(4, self.endian)
+        # MOV x29, sp
+        res += ((0b1001000100 << 22) | (self.rSP << 5) | self.x29).to_bytes(4, self.endian)
+        return res
+
+    def gen_destroy_stackframe(self):
+        # MOV sp, x29
+        res = ((0b1001000100 << 22) | (self.x29 << 5) | self.rSP).to_bytes(4, self.endian)
+        # LDP x29, x30, [sp], #16
+        res += ((0b1010100011 << 22) | (16 << 15) | (self.x30 << 10) | (self.rSP << 5) | self.x29).to_bytes(4, self.endian)
+        return res
+
+    def gen_frame_store(self, reg):
+        if reg.is_int:
+            # Always push a pair because of alignment requirement
+            # STR REG, [sp, #-16]!
+            res = ((0b11111000000 << 21) | ((-16 & 0x1ff) << 12) | (0b11 << 10) | (self.rSP << 5) | reg.n).to_bytes(4, self.endian)
+            return res, 16
+        else:
+            raise NotImplementedError(f'store fp on stack frame not supported')
+
+    def gen_frame_load(self, reg, offset):
+        if reg.is_int:
+            res = ((0b11111000010 << 21) | ((-offset & 0x1ff) << 12) | (0b01 << 10) | (self.x29 << 5) | reg.n).to_bytes(4, self.endian)
+        else:
+            raise NotImplementedError(f'load fp from frame not supported')
+        return res
 
 # OS traits
 class linux_traits:
@@ -1508,6 +1594,10 @@ class linux_aarch64_traits(aarch64_encoding, linux_traits):
     @classmethod
     def get_syscall_arg_reg(cls, nr):
         return Register(RegType.int64, cls.syscall_arg_regs[nr])
+
+    @classmethod
+    def get_syscall_res_reg(cls):
+        return Register(RegType.int64, cls.x0)
 
     @classmethod
     def gen_syscall(cls, nr):
