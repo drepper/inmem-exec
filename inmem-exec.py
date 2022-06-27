@@ -1366,7 +1366,7 @@ class aarch64_encoding(RegAlloc):
 
     def gen_store_flag(self, op, reg):
         if not reg:
-            reg = self.get_unused_reg(RegType.int32)
+            reg = self.get_unused_reg(RegType.int64)
         res = self.gen_loadimm(reg, 0)
         match op:
             case ast.Eq():
@@ -1386,6 +1386,7 @@ class aarch64_encoding(RegAlloc):
                 cond = self.Cond.NE
             case _:
                 raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
+        # B.<cond> <lab>
         return [ (((0b01010100 << 24) | cond).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64bc19)) ]
 
     def gen_jump(self, curoff, lab):
@@ -1427,7 +1428,7 @@ class aarch64_encoding(RegAlloc):
         if reg.is_int:
             res = self.gen_loadimm(reg, -offset, signed=True)
             # LDR <reg>, [<reg>, x29]
-            res += ((0b11111000011 << 21) | (self.x29 << 16) | (0b0110 << 12) | (0b10 << 10) | (reg.n << 5) | reg.n).to_bytes(4, self.endian)
+            res += ((0b11111000011 << 21) | (self.x29 << 16) | (0b011010 << 10) | (reg.n << 5) | reg.n).to_bytes(4, self.endian)
         else:
             raise NotImplementedError(f'load fp from frame not supported')
         return res
