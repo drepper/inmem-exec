@@ -1285,7 +1285,7 @@ class aarch64_encoding(RegAlloc):
         if reg.is_int:
             if val >= 0 and val < 65536:
                 res = (0xd2800000 | (val << 5) | reg.n).to_bytes(4, cls.endian)
-            elif val < 0 and -val >= 0x10000:
+            elif val < 0 and -val < 0x10000:
                 res = (0x92800000 | ((-val - 1) << 5) | reg.n).to_bytes(4, cls.endian)
             elif -val == 0x10001:
                 res = (0x92a00020 | reg.n).to_bytes(4, cls.endian)
@@ -1375,8 +1375,8 @@ class aarch64_encoding(RegAlloc):
                 cond = self.Cond.EQ
             case _:
                 raise NotImplementedError(f'unsupported comparison {op}')
-        # CSET reg, <cond>
-        return (0x9a9f17e0 | (cond << 12) | reg.n).to_bytes(4, self.endian), reg
+        # CSET <reg>, <cond>
+        return (0x9a9f07e0 | (cond << 12) | reg.n).to_bytes(4, self.endian), reg
 
     def gen_condjump(self, curoff, flags, exp, lab):
         match (flags.op, exp):
@@ -1397,11 +1397,12 @@ class aarch64_encoding(RegAlloc):
         return [ ((0b100101 << 26).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64b26))]
 
     def gen_return(self):
+        # RET
         return (0xd65f0000 | (self.x30 << 5)).to_bytes(4, self.endian)
 
     def gen_create_stackframe(self):
         # STP x29, x30, [sp, #-16]!
-        res = ((0b1010100110 << 22) | ((-16 & 0x7f) << 15) | (self.x30 << 10) | (self.rSP << 5) | self.x29).to_bytes(4, self.endian)
+        res = ((0b1010100110 << 22) | (((-16 // 8) & 0x7f) << 15) | (self.x30 << 10) | (self.rSP << 5) | self.x29).to_bytes(4, self.endian)
         # MOV x29, sp
         res += ((0b1001000100 << 22) | (self.rSP << 5) | self.x29).to_bytes(4, self.endian)
         return res
@@ -1415,8 +1416,8 @@ class aarch64_encoding(RegAlloc):
 
     def gen_frame_store(self, reg):
         if reg.is_int:
-            # Always push a pair because of alignment requirement
-            # STR REG, [sp, #-16]!
+            # Always push 16 bytes because of alignment requirement
+            # STR <reg>, [sp, #-16]!
             res = ((0b11111000000 << 21) | ((-16 & 0x1ff) << 12) | (0b11 << 10) | (self.rSP << 5) | reg.n).to_bytes(4, self.endian)
             return res, 16
         else:
@@ -1424,7 +1425,9 @@ class aarch64_encoding(RegAlloc):
 
     def gen_frame_load(self, reg, offset):
         if reg.is_int:
-            res = ((0b11111000010 << 21) | ((-offset & 0x1ff) << 12) | (0b01 << 10) | (self.x29 << 5) | reg.n).to_bytes(4, self.endian)
+            res = self.gen_loadimm(reg, -offset, signed=True)
+            # LDR <reg>, [<reg>, x29]
+            res += ((0b11111000011 << 21) | (self.x29 << 16) | (0b0110 << 12) | (0b10 << 10) | (reg.n << 5) | reg.n).to_bytes(4, self.endian)
         else:
             raise NotImplementedError(f'load fp from frame not supported')
         return res
