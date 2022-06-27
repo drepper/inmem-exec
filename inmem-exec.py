@@ -1225,6 +1225,24 @@ class aarch64_encoding(RegAlloc):
     rF7 = 0b00111
     rF8 = 0b01000
 
+    @enum.unique
+    class Cond(enum.IntEnum):
+        EQ = 0b0000
+        NE = 0b0001
+        CS = 0b0010
+        CC = 0b0011
+        MI = 0b0100
+        PL = 0b0101
+        VS = 0b0110
+        VC = 0b0111
+        HI = 0b1000
+        LS = 0b1001
+        GE = 0b1010
+        LT = 0b1011
+        GT = 0b1100
+        LE = 0b1101
+        AL = 0b1110
+
     def __init__(self):
         super().__init__(0, self.n_int_regs - 3, 0, self.n_fp_regs)
 
@@ -1352,19 +1370,20 @@ class aarch64_encoding(RegAlloc):
         res = self.gen_loadimm(reg, 0)
         match op:
             case ast.Eq():
-                res = (0x9a9f17e0 | reg.n).to_bytes(4, self.endian)
+                cond = self.Cond.NE
             case ast.NotEq():
-                res = (0x9a9f07e0 | reg.n).to_bytes(4, self.endian)
+                cond = self.Cond.EQ
             case _:
                 raise NotImplementedError(f'unsupported comparison {op}')
-        return res, reg
+        # CSET reg, <cond>
+        return (0x9a9f17e0 | (cond << 12) | reg.n).to_bytes(4, self.endian), reg
 
     def gen_condjump(self, curoff, flags, exp, lab):
         match (flags.op, exp):
             case (ast.Eq(), True) | (ast.NotEq(), False):
-                cond = 0b0000
+                cond = self.Cond.EQ
             case (ast.Eq(), False) | (ast.NotEq(), True):
-                cond = 0b0001
+                cond = self.Cond.NE
             case _:
                 raise NotImplementedError(f'unhandled condjump {flags.op}/{exp}')
         return [ (((0b01010100 << 24) | cond).to_bytes(4, self.endian), Relocation(lab, b'.text', curoff, RelType.aarch64bc19)) ]
