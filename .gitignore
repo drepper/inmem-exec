@@ -4,3 +4,4 @@ asm-hello-x86_64
 test
 inmem-exec.sublime-project
 inmem-exec.sublime-workspace
+__pycache__

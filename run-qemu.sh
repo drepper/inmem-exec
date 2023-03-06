@@ -7,7 +7,8 @@ case "$f" in
   *x86-64*) suf=x86-64 ;;
   *32-bit*ARM*) suf=arm ;;
   *ARM*aarch64*) suf=aarch64 ;;
+  *MSB*Xtensa*) suf=xtensaeb ;;
   *) printf '???\n'; exit 1 ;;
 esac
 
-exec qemu-"$suf" -singlestep -d in_asm,cpu ./test "$@"
+exec qemu-"$suf" -singlestep -d in_asm,cpu "$@"
