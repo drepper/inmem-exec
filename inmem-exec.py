@@ -2068,7 +2068,7 @@ class Config(object):
     @staticmethod
     def determine_config(system, processor):
         system = system or platform.system()
-        processor = processor or platform.processor()
+        processor = processor or platform.machine()
         try:
             archs = known_arch_os[system]
             for a in archs:
