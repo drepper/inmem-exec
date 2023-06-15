@@ -26,10 +26,10 @@ import os;
 exec(gzip.decompress(sys.stdin.buffer.read(int.from_bytes(sys.stdin.buffer.read(4),"little"))).decode("UTF-8"));\''
 
 if [ $interactive -ne 0 ]; then
-  (python gencompress.py "$infile"; cat) | ssh $jump $host python3 -c $prog
+  (python3 gencompress.py "$infile"; cat) | ssh $jump $host python3 -c $prog
   exit $?
 else
-  python gencompress.py "$infile" | ssh $jump $host python3 -c $prog
+  python3 gencompress.py "$infile" | ssh $jump $host python3 -c $prog
   exit $?
 fi
 exit 1
