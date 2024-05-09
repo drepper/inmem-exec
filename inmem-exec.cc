@@ -34,18 +34,18 @@ template<> struct traits<64> {
   static auto getshdr(Elf_Scn* scn) { return elf64_getshdr(scn); }
 };
 
-std::array<unsigned char,37> codebuf {
-  0xb8, 0x01, 0x00, 0x00, 0x00, //                   mov    $SYS_write,%eax
-  0xbf, 0x01, 0x00, 0x00, 0x00, //                   mov    $0x1,%edi
-  0x48, 0x8d, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, // lea    0x0,%rsi
-  0xba, 0x0c, 0x00, 0x00, 0x00, //                   mov    $0xc,%edx
-  0x0f, 0x05, //                                     syscall
-  0xb8, 0xe7, 0x00, 0x00, 0x00, //                   mov    $SYS_exit_group,%eax
-  0xbf, 0x00, 0x00, 0x00, 0x00, //                   mov    $0x0,%edi
-  0x0f, 0x05 //                                      syscall
+std::array codebuf {
+  '\xb8', '\x01', '\x00', '\x00', '\x00', //                         mov    $SYS_write,%eax
+  '\xbf', '\x01', '\x00', '\x00', '\x00', //                         mov    $0x1,%edi
+  '\x48', '\x8d', '\x34', '\x25', '\x00', '\x00', '\x00', '\x00', // lea    0x0,%rsi
+  '\xba', '\x0c', '\x00', '\x00', '\x00', //                         mov    $0xc,%edx
+  '\x0f', '\x05', //                                                 syscall
+  '\xb8', '\xe7', '\x00', '\x00', '\x00', //                         mov    $SYS_exit_group,%eax
+  '\xbf', '\x00', '\x00', '\x00', '\x00', //                         mov    $0x0,%edi
+  '\x0f', '\x05', //                                                 syscall
 };
 
-std::array<char,12> rodatabuf {
+std::array rodatabuf {
   'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', '\n'
 };
 
